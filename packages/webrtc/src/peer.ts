@@ -16,7 +16,7 @@ export interface PeerOptions {
   readonly createIceCandidate?: (candidate: RTCIceCandidateInit) => RTCIceCandidate;
 }
 
-/** Create an audio peer using perfect negotiation. The signaling transport is owned by the caller. */
+/** Create a media peer using perfect negotiation. The signaling transport is owned by the caller. */
 export function createDuplexPeer(transport: SignalingTransport, options: PeerOptions): DuplexPeer {
   const createConnection =
     options.createPeerConnection ?? ((configuration) => new RTCPeerConnection(configuration));
@@ -25,6 +25,9 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
   const connection = createConnection({
     iceServers: options.iceServers ?? [{ urls: 'stun:stun.l.google.com:19302' }],
   });
+  // Keep one stable outgoing video sender so camera and display tracks can be swapped without
+  // rebuilding the peer connection or negotiating a second video track.
+  const videoSender = connection.addTransceiver('video', { direction: 'sendrecv' }).sender;
   let makingOffer = false;
   let ignoreOffer = false;
   let isSettingRemoteAnswerPending = false;
@@ -34,6 +37,20 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
   let connectionState: DuplexConnectionState = 'idle';
   const listeners = new Set<PeerEventListener>();
   const remoteTracks = new Map<string, MediaStreamTrack>();
+  const emitRemoteMedia = (): void => {
+    const tracks = [...remoteTracks.values()];
+    const audioTracks = tracks.filter((track) => track.kind === 'audio');
+    const videoTracks = tracks.filter(
+      (track) => track.kind === 'video' && !track.muted && track.readyState !== 'ended',
+    );
+    emit({
+      type: 'remote-media',
+      media: {
+        audio: audioTracks.length ? new MediaStream(audioTracks) : null,
+        video: videoTracks.length ? new MediaStream(videoTracks) : null,
+      },
+    });
+  };
 
   const emit = (event: PeerEvent): void => {
     for (const listener of listeners) listener(event);
@@ -94,12 +111,18 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
   };
 
   connection.ontrack = (event) => {
-    for (const track of event.streams[0]?.getTracks() ?? [event.track])
+    for (const track of event.streams[0]?.getTracks() ?? [event.track]) {
       remoteTracks.set(track.id, track);
-    emit({
-      type: 'remote-media',
-      media: { audio: new MediaStream([...remoteTracks.values()]), camera: null, screen: null },
-    });
+      if (track.kind === 'video') {
+        track.onmute = emitRemoteMedia;
+        track.onunmute = emitRemoteMedia;
+      }
+      track.onended = () => {
+        remoteTracks.delete(track.id);
+        emitRemoteMedia();
+      };
+    }
+    emitRemoteMedia();
   };
 
   connection.onconnectionstatechange = emitState;
@@ -166,6 +189,9 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     get connectionState() {
       return connectionState;
     },
+    setVideoTrack(track): Promise<void> {
+      return videoSender.replaceTrack(track);
+    },
     subscribe(listener: PeerEventListener): () => void {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -180,6 +206,11 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
       connection.onconnectionstatechange = null;
       connection.oniceconnectionstatechange = null;
       connection.close();
+      for (const track of remoteTracks.values()) {
+        track.onmute = null;
+        track.onunmute = null;
+        track.onended = null;
+      }
       remoteTracks.clear();
       connectionState = 'closed';
       emit({ type: 'connection-state', state: 'closed' });

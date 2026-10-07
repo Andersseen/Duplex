@@ -9,19 +9,10 @@ export const DATA_CHANNEL_LABELS = {
 
 export type DataChannelLabel = (typeof DATA_CHANNEL_LABELS)[keyof typeof DATA_CHANNEL_LABELS];
 
-/** Which kind of video a remote track carries. Screen share is distinct from camera. */
-export type VideoSource = 'camera' | 'screen';
-
-export interface LocalMedia {
-  readonly audio: MediaStream | null;
-  readonly camera: MediaStream | null;
-  readonly screen: MediaStream | null;
-}
-
 export interface RemoteMedia {
   readonly audio: MediaStream | null;
-  readonly camera: MediaStream | null;
-  readonly screen: MediaStream | null;
+  /** The single active remote video source; Duplex does not infer camera vs screen. */
+  readonly video: MediaStream | null;
 }
 
 export type PeerEvent =
@@ -43,6 +34,7 @@ export interface SignalingTransport {
  */
 export interface DuplexPeer {
   readonly connectionState: DuplexConnectionState;
+  setVideoTrack(track: MediaStreamTrack | null): Promise<void>;
   subscribe(listener: PeerEventListener): () => void;
   close(): void;
 }

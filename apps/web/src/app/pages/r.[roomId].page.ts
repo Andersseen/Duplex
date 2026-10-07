@@ -1,134 +1,205 @@
 import {
   ChangeDetectionStrategy,
   Component,
-  ViewChild,
+  effect,
+  inject,
+  signal,
+  viewChild,
   computed,
   input,
-  signal,
 } from '@angular/core';
 import type { ElementRef, OnDestroy } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { PROTOCOL_VERSION, roomIdSchema, serverSignalingMessageSchema } from '@duplex/protocol';
-import type { ServerSignalingMessage, SignalingMessage } from '@duplex/protocol';
-import { createDuplexPeer } from '@duplex/webrtc';
-import type { DuplexPeer, PeerSignalingMessage, SignalingTransport } from '@duplex/webrtc';
-
-type CallState =
-  | 'ready'
-  | 'requesting-media'
-  | 'joining'
-  | 'waiting-for-peer'
-  | 'connecting'
-  | 'connected'
-  | 'reconnecting'
-  | 'failed'
-  | 'left';
+import { roomIdSchema } from '@duplex/protocol';
+import { CallSessionService } from '../services/call-session.service';
 
 @Component({
   selector: 'dx-room-page',
   imports: [RouterLink],
+  providers: [CallSessionService],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'flex min-h-dvh flex-col px-6 py-8 sm:px-10' },
+  host: { class: 'flex min-h-dvh flex-col px-6 py-6 sm:px-10' },
   template: `
-    <header>
+    <header class="flex items-center justify-between">
       <a
         routerLink="/"
         class="text-lg font-semibold tracking-tight focus-visible:outline-2 focus-visible:outline-offset-4"
         >Duplex</a
       >
+      @if (isActive()) {
+        <span class="text-sm text-zinc-600 dark:text-zinc-400">{{ statusText() }}</span>
+      }
     </header>
 
-    <main class="flex flex-1 flex-col items-start justify-center gap-5 pb-16">
+    <main class="flex flex-1 flex-col items-center justify-center gap-6 py-8">
+      <section
+        class="relative flex min-h-[45vh] w-full max-w-6xl items-center justify-center overflow-hidden rounded-3xl border border-zinc-200 bg-zinc-100 p-3 dark:border-zinc-800 dark:bg-zinc-900 sm:min-h-[60vh]"
+        [class.hidden]="
+          !isActive() || (!session.remoteVideoStream() && !session.localVideoStream())
+        "
+        aria-label="Video call"
+      >
+        <video
+          #remoteVideo
+          autoplay
+          playsinline
+          [class.hidden]="!session.remoteVideoStream()"
+          class="max-h-[70vh] w-full object-contain"
+          aria-label="Peer video or shared screen"
+        ></video>
+        <div
+          [class.hidden]="session.remoteVideoStream() || session.screenSharing()"
+          class="flex min-h-64 items-center justify-center text-zinc-500"
+        >
+          Your preview
+        </div>
+        <video
+          #localVideo
+          autoplay
+          muted
+          playsinline
+          [class.hidden]="!session.localVideoStream()"
+          [class]="
+            session.screenSharing() && !session.remoteVideoStream()
+              ? 'max-h-[70vh] w-full object-contain'
+              : 'absolute bottom-5 right-5 max-h-40 w-[min(28%,18rem)] rounded-2xl border border-white/70 bg-zinc-200 object-contain shadow-lg'
+          "
+          aria-label="Your camera or shared screen preview"
+        ></video>
+      </section>
       @if (!isValidRoom()) {
         <h1 class="text-3xl font-semibold tracking-tight sm:text-5xl">Invalid room link</h1>
         <p class="max-w-prose text-lg text-zinc-600 dark:text-zinc-400">
           This link is not a Duplex room.
         </p>
         <a routerLink="/" class="underline underline-offset-4">Start a new call</a>
-      } @else {
-        <h1 class="text-3xl font-semibold tracking-tight sm:text-5xl">{{ heading() }}</h1>
-        @if (error()) {
-          <p role="alert" class="max-w-prose text-zinc-600 dark:text-zinc-400">{{ error() }}</p>
-        }
-        @if (state() === 'ready') {
-          <p class="text-lg text-zinc-600 dark:text-zinc-400">
-            Your microphone will turn on when you join.
+      } @else if (session.state() === 'ready') {
+        <h1 class="text-3xl font-semibold tracking-tight sm:text-5xl">Ready to join</h1>
+        <p class="text-lg text-zinc-600 dark:text-zinc-400">
+          Your microphone will turn on when you join.
+        </p>
+        <button
+          type="button"
+          class="rounded-full bg-zinc-900 px-7 py-3.5 font-medium text-zinc-50 dark:bg-zinc-50 dark:text-zinc-900"
+          (click)="join()"
+        >
+          Join call
+        </button>
+      } @else if (session.state() === 'failed' || session.state() === 'left') {
+        <h1 class="text-3xl font-semibold tracking-tight sm:text-5xl">
+          {{ session.state() === 'left' ? 'You left the call' : 'Could not join the call' }}
+        </h1>
+        @if (session.sessionError()) {
+          <p role="alert" class="max-w-prose text-zinc-600 dark:text-zinc-400">
+            {{ session.sessionError() }}
           </p>
+        }
+        <div class="flex gap-3">
           <button
             type="button"
-            class="rounded-full bg-zinc-900 px-7 py-3.5 font-medium text-zinc-50 dark:bg-zinc-50 dark:text-zinc-900"
+            class="rounded-full bg-zinc-900 px-5 py-2.5 text-white dark:bg-zinc-50 dark:text-zinc-900"
             (click)="join()"
           >
-            Join call
+            {{ session.state() === 'left' ? 'Rejoin call' : 'Try again' }}
           </button>
-        } @else if (
-          state() === 'waiting-for-peer' ||
-          state() === 'connected' ||
-          state() === 'connecting' ||
-          state() === 'reconnecting'
-        ) {
-          <p class="text-zinc-600 dark:text-zinc-400">{{ statusText() }}</p>
-          @if (state() !== 'connected') {
-            <div class="flex flex-col gap-2">
-              <label for="room-link" class="text-sm font-medium">Copy this link</label>
-              <div class="flex items-center gap-2">
-                <input
-                  id="room-link"
-                  class="w-[min(70vw,32rem)] rounded-lg border border-zinc-300 bg-transparent px-3 py-2 text-sm"
-                  readonly
-                  [value]="currentUrl()"
-                />
-                <button
-                  type="button"
-                  class="rounded-full border border-zinc-300 px-4 py-2 text-sm"
-                  (click)="copyLink()"
-                >
-                  {{ copied() ? 'Copied' : 'Copy link' }}
-                </button>
-              </div>
-            </div>
-          }
-          @if (state() === 'connected') {
-            <p class="text-sm text-zinc-600 dark:text-zinc-400">● You &nbsp; ● Peer</p>
-            <div class="flex gap-3">
-              <button
-                type="button"
-                class="rounded-full border border-zinc-300 px-5 py-2.5"
-                (click)="toggleMute()"
-              >
-                {{ muted() ? 'Unmute' : 'Mute' }}
-              </button>
-              <button
-                type="button"
-                class="rounded-full bg-zinc-900 px-5 py-2.5 text-white dark:bg-zinc-50 dark:text-zinc-900"
-                (click)="leave()"
-              >
-                Leave
-              </button>
-            </div>
-          }
-          @if (state() === 'waiting-for-peer') {
+          <a routerLink="/" class="rounded-full border border-zinc-300 px-5 py-2.5">Back</a>
+        </div>
+      } @else if (session.state() === 'requesting-media' || session.state() === 'joining') {
+        <h1 class="text-3xl font-semibold tracking-tight">
+          {{ session.state() === 'joining' ? 'Joining call…' : 'Allow microphone access' }}
+        </h1>
+        @if (session.sessionError()) {
+          <p role="alert">{{ session.sessionError() }}</p>
+        }
+      } @else {
+        @if (session.sessionError()) {
+          <p role="alert" class="text-sm text-rose-700 dark:text-rose-300">
+            {{ session.sessionError() }}
+          </p>
+        }
+        <section
+          class="flex min-h-[30vh] w-full max-w-4xl flex-col items-center justify-center gap-3 rounded-3xl border border-zinc-200 bg-zinc-50 px-6 text-center dark:border-zinc-800 dark:bg-zinc-900"
+          [class.hidden]="session.remoteVideoStream() || session.localVideoStream()"
+          aria-label="Audio call"
+        >
+          <h1 class="text-3xl font-semibold tracking-tight">
+            {{ session.state() === 'connected' ? 'Connected' : statusText() }}
+          </h1>
+          <p class="text-zinc-600 dark:text-zinc-400">
+            {{
+              session.state() === 'connected'
+                ? 'Audio call · Camera and screen are off.'
+                : 'Share this link with the person you want to talk to.'
+            }}
+          </p>
+        </section>
+
+        @if (session.state() !== 'connected') {
+          <div class="flex flex-wrap items-center justify-center gap-2">
+            <label for="room-link" class="text-sm font-medium">Copy this link</label>
+            <input
+              id="room-link"
+              class="w-[min(60vw,32rem)] rounded-lg border border-zinc-300 bg-transparent px-3 py-2 text-sm"
+              readonly
+              [value]="session.roomUrl()"
+            />
             <button
               type="button"
-              class="rounded-full border border-zinc-300 px-5 py-2.5"
-              (click)="leave()"
+              class="rounded-full border border-zinc-300 px-4 py-2 text-sm"
+              (click)="copyLink()"
             >
-              Leave
+              {{ copied() ? 'Copied' : 'Copy link' }}
             </button>
-          }
-        } @else if (state() === 'failed' || state() === 'left') {
-          <div class="flex gap-3">
-            <button
-              type="button"
-              class="rounded-full bg-zinc-900 px-5 py-2.5 text-white dark:bg-zinc-50 dark:text-zinc-900"
-              (click)="reset()"
-            >
-              {{ state() === 'left' ? 'Rejoin call' : 'Try again' }}
-            </button>
-            <a routerLink="/" class="rounded-full border border-zinc-300 px-5 py-2.5">Back</a>
           </div>
-        } @else {
-          <p class="text-zinc-600 dark:text-zinc-400">{{ statusText() }}</p>
+        }
+
+        <div class="flex flex-wrap justify-center gap-3" aria-label="Call controls">
+          <button
+            type="button"
+            class="rounded-full border border-zinc-300 px-5 py-2.5"
+            [attr.aria-pressed]="!session.muted()"
+            (click)="session.toggleMute()"
+          >
+            {{ session.muted() ? 'Unmute' : 'Mute' }}
+          </button>
+          <button
+            type="button"
+            class="rounded-full border border-zinc-300 px-5 py-2.5"
+            [attr.aria-pressed]="session.cameraEnabled()"
+            (click)="session.toggleCamera()"
+          >
+            {{ session.cameraEnabled() ? 'Camera off' : 'Turn camera on' }}
+          </button>
+          <button
+            type="button"
+            class="rounded-full border border-zinc-300 px-5 py-2.5"
+            [attr.aria-pressed]="session.screenSharing()"
+            (click)="session.toggleScreenSharing()"
+          >
+            {{ session.screenSharing() ? 'Stop sharing' : 'Share screen' }}
+          </button>
+          <button
+            type="button"
+            class="rounded-full bg-zinc-900 px-5 py-2.5 text-white dark:bg-zinc-50 dark:text-zinc-900"
+            (click)="leave()"
+          >
+            Leave
+          </button>
+        </div>
+        @if (session.cameraError()) {
+          <p role="alert" class="text-sm text-rose-700 dark:text-rose-300">
+            {{ session.cameraError() }}
+          </p>
+        }
+        @if (session.screenError()) {
+          <p role="alert" class="text-sm text-rose-700 dark:text-rose-300">
+            {{ session.screenError() }}
+          </p>
+        }
+        @if (session.screenSharing()) {
+          <p class="text-sm text-zinc-600 dark:text-zinc-400">
+            Sharing screen. Your camera will resume when sharing stops.
+          </p>
         }
       }
       <audio #remoteAudio autoplay></audio>
@@ -137,114 +208,58 @@ type CallState =
 })
 export default class RoomPage implements OnDestroy {
   readonly roomId = input.required<string>();
-  protected readonly state = signal<CallState>('ready');
-  protected readonly error = signal('');
-  protected readonly muted = signal(false);
+  protected readonly session = inject(CallSessionService);
   protected readonly copied = signal(false);
-  protected readonly currentUrl = signal('');
   protected readonly isValidRoom = computed(() => roomIdSchema.safeParse(this.roomId()).success);
-  protected readonly heading = computed(() => {
-    switch (this.state()) {
-      case 'ready':
-        return 'Ready to join';
-      case 'requesting-media':
-        return 'Allow microphone access';
-      case 'joining':
-        return 'Joining call…';
+  protected readonly isActive = computed(() =>
+    ['waiting-for-peer', 'connecting', 'connected', 'reconnecting'].includes(this.session.state()),
+  );
+  protected readonly statusText = computed(() => {
+    switch (this.session.state()) {
       case 'waiting-for-peer':
         return 'Waiting for someone to join…';
-      case 'connected':
-        return 'Connected';
       case 'connecting':
         return 'Connecting…';
       case 'reconnecting':
-        return 'Reconnecting…';
-      case 'failed':
-        return 'Could not join the call';
-      case 'left':
-        return 'You left the call';
+        return 'Connection interrupted. Reconnecting…';
+      default:
+        return 'Connected';
     }
   });
-  protected readonly statusText = computed(() =>
-    this.state() === 'waiting-for-peer'
-      ? 'Share this link with the person you want to talk to.'
-      : this.state() === 'connecting'
-        ? 'Setting up a direct audio connection…'
-        : this.state() === 'reconnecting'
-          ? 'The audio connection was interrupted.'
-          : 'Your call is active.',
-  );
 
-  @ViewChild('remoteAudio') private remoteAudio?: ElementRef<HTMLAudioElement>;
-  private socket: WebSocket | null = null;
-  private peer: DuplexPeer | null = null;
-  private localStream: MediaStream | null = null;
-  private peerUnsubscribe: (() => void) | null = null;
-  private callTransport: SignalingTransport | null = null;
-  private timeoutId: ReturnType<typeof setTimeout> | null = null;
-  private leaving = false;
+  private readonly remoteAudio = viewChild<ElementRef<HTMLAudioElement>>('remoteAudio');
+  private readonly remoteVideo = viewChild<ElementRef<HTMLVideoElement>>('remoteVideo');
+  private readonly localVideo = viewChild<ElementRef<HTMLVideoElement>>('localVideo');
 
-  async join(): Promise<void> {
-    if (!this.isValidRoom() || this.state() === 'joining' || this.state() === 'requesting-media')
-      return;
-    this.clearResources(false);
-    this.error.set('');
-    this.leaving = false;
-    this.state.set('requesting-media');
-    try {
-      this.localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    } catch {
-      this.fail(
-        'Microphone permission was denied or no microphone is available. Check browser permissions and try again.',
-      );
-      return;
-    }
-
-    this.state.set('joining');
-    const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${scheme}//${location.host}/api/rooms/${encodeURIComponent(this.roomId())}/ws`;
-    try {
-      const socket = new WebSocket(url);
-      this.socket = socket;
-      this.currentUrl.set(location.href);
-      socket.onopen = () => {
-        const joinMessage: SignalingMessage = {
-          type: 'join',
-          payload: { roomId: this.roomId(), protocolVersion: PROTOCOL_VERSION },
-        };
-        socket.send(JSON.stringify(joinMessage));
-      };
-      socket.onmessage = (event: MessageEvent<unknown>) => {
-        this.onServerMessage(event.data);
-      };
-      socket.onerror = () => {
-        this.fail('The room connection failed. Check your connection and try again.');
-      };
-      socket.onclose = (event) => {
-        if (this.leaving || this.state() === 'failed' || this.state() === 'left') return;
-        if (event.code === 4001)
-          this.fail(
-            'This Duplex version is not compatible with the room server. Reload the page to update.',
-          );
-        else if (event.code !== 1000) this.fail('The room connection closed. Try joining again.');
-      };
-      this.timeoutId = setTimeout(() => {
-        if (this.state() === 'joining')
-          this.fail('The room did not respond. Check your connection and try again.');
-      }, 10000);
-    } catch {
-      this.fail('Could not open the room connection. Try again.');
-    }
+  constructor() {
+    effect(() => {
+      const audio = this.remoteAudio()?.nativeElement;
+      if (audio) {
+        audio.srcObject = this.session.remoteAudioStream();
+        if (audio.srcObject) void audio.play().catch(() => undefined);
+      }
+      const video = this.remoteVideo()?.nativeElement;
+      if (video) {
+        video.srcObject = this.session.remoteVideoStream();
+        if (video.srcObject) void video.play().catch(() => undefined);
+      }
+      const local = this.localVideo()?.nativeElement;
+      if (local) {
+        local.srcObject = this.session.localVideoStream();
+        if (local.srcObject) void local.play().catch(() => undefined);
+      }
+    });
   }
 
-  protected toggleMute(): void {
-    const nextMuted = !this.muted();
-    for (const track of this.localStream?.getAudioTracks() ?? []) track.enabled = !nextMuted;
-    this.muted.set(nextMuted);
+  protected join(): void {
+    void this.session.join(this.roomId());
+  }
+  protected leave(): void {
+    this.session.leave();
   }
 
   protected async copyLink(): Promise<void> {
-    const text = location.href;
+    const text = this.session.copyLink();
     try {
       if (!window.isSecureContext) throw new Error('Clipboard requires a secure context.');
       await navigator.clipboard.writeText(text);
@@ -253,140 +268,13 @@ export default class RoomPage implements OnDestroy {
         this.copied.set(false);
       }, 2000);
     } catch {
-      this.error.set('Copy is unavailable here. Select and copy the room link above.');
+      // The visible readonly URL remains selectable when clipboard access is unavailable.
     }
-  }
-
-  protected leave(): void {
-    this.leaving = true;
-    this.socket?.send(JSON.stringify({ type: 'leave', payload: {} } satisfies SignalingMessage));
-    this.clearResources(true);
-    this.state.set('left');
-    this.error.set('');
-  }
-
-  protected reset(): void {
-    void this.join();
   }
 
   ngOnDestroy(): void {
-    this.leaving = true;
-    this.clearResources(true);
-  }
-
-  private onServerMessage(data: unknown): void {
-    let raw: unknown;
-    try {
-      raw = typeof data === 'string' ? JSON.parse(data) : data;
-    } catch {
-      this.fail('The room sent an invalid message.');
-      return;
-    }
-    const result = serverSignalingMessageSchema.safeParse(raw);
-    if (!result.success) {
-      this.fail('The room sent an unsupported message. Reload and try again.');
-      return;
-    }
-    const message = result.data;
-    if (message.type === 'joined') {
-      this.lastJoined = message.payload;
-      if (this.timeoutId) clearTimeout(this.timeoutId);
-      this.makeTransport();
-      if (message.payload.peerPresent) this.startPeer(message.payload.polite);
-      else this.state.set('waiting-for-peer');
-    } else if (message.type === 'peer-joined') {
-      const joined = this.lastJoined;
-      if (joined) this.startPeer(joined.polite);
-    } else if (message.type === 'peer-left') {
-      this.closePeer();
-      if (this.localStream) this.state.set('waiting-for-peer');
-    } else if (message.type === 'room-full') {
-      this.fail('This room already has two participants. Ask them to share a new link.');
-      this.socket?.close(4009, 'Room is full');
-    } else if (message.type === 'protocol-error') {
-      this.fail(
-        message.payload.code === 'protocol_mismatch'
-          ? 'This Duplex version is not compatible with the room server. Reload the page to update.'
-          : message.payload.message,
-      );
-    } else if (this.transportListener) {
-      this.transportListener(message);
-    }
-  }
-
-  private lastJoined: Extract<ServerSignalingMessage, { type: 'joined' }>['payload'] | null = null;
-  private transportListener: ((message: PeerSignalingMessage) => void) | null = null;
-
-  private makeTransport(): void {
-    const listeners = new Set<(message: PeerSignalingMessage) => void>();
-    this.callTransport = {
-      send: (message) => {
-        if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message));
-      },
-      subscribe: (listener) => {
-        listeners.add(listener);
-        return () => listeners.delete(listener);
-      },
-    };
-    this.transportListener = (message) => {
-      for (const listener of listeners) listener(message);
-    };
-  }
-
-  private startPeer(polite: boolean): void {
-    if (!this.localStream || !this.callTransport || this.peer) return;
-    this.peer = createDuplexPeer(this.callTransport, { polite, localStream: this.localStream });
-    this.peerUnsubscribe = this.peer.subscribe((event) => {
-      if (event.type === 'connection-state') {
-        if (event.state === 'connected') this.state.set('connected');
-        else if (event.state === 'reconnecting') this.state.set('reconnecting');
-        else if (event.state === 'failed')
-          this.fail('The direct audio connection failed. Leave and try again.');
-        else if (event.state === 'connecting') this.state.set('connecting');
-      } else if (event.type === 'remote-media' && this.remoteAudio) {
-        const audio = event.media.audio;
-        this.remoteAudio.nativeElement.srcObject = audio;
-        void this.remoteAudio.nativeElement.play().catch(() => {
-          this.error.set('Tap the page to allow remote audio playback.');
-        });
-      }
-    });
-    this.state.set('connecting');
-  }
-
-  private closePeer(): void {
-    this.peerUnsubscribe?.();
-    this.peerUnsubscribe = null;
-    this.peer?.close();
-    this.peer = null;
-    if (this.remoteAudio) this.remoteAudio.nativeElement.srcObject = null;
-  }
-
-  private fail(message: string): void {
-    this.error.set(message);
-    this.state.set('failed');
-    this.leaving = true;
-    this.clearResources(true);
-  }
-
-  private clearResources(stopMedia: boolean): void {
-    if (this.timeoutId) clearTimeout(this.timeoutId);
-    this.timeoutId = null;
-    this.closePeer();
-    this.transportListener = null;
-    this.callTransport = null;
-    if (this.socket) {
-      this.socket.onopen = null;
-      this.socket.onmessage = null;
-      this.socket.onerror = null;
-      this.socket.onclose = null;
-      if (this.socket.readyState < WebSocket.CLOSING) this.socket.close(1000, 'Call closed');
-      this.socket = null;
-    }
-    if (stopMedia) {
-      for (const track of this.localStream?.getTracks() ?? []) track.stop();
-      this.localStream = null;
-      this.muted.set(false);
+    for (const ref of [this.remoteAudio(), this.remoteVideo(), this.localVideo()]) {
+      if (ref) ref.nativeElement.srcObject = null;
     }
   }
 }
