@@ -1,21 +1,23 @@
 # Duplex
 
-Duplex is a lightweight way to start a private 1:1 browser audio call. Create a room link, send it to one person, and talk. Rooms are anonymous, ephemeral, and hold at most two participants.
+Duplex is a lightweight way to start a private 1:1 browser call. Create a room link, send it to one person, and talk or share video. Rooms are anonymous, ephemeral, and hold at most two participants.
 
 ## Status
 
-**Duplex supports real 1:1 audio calls.** A participant explicitly joins before the browser requests microphone access. Signaling travels through the Worker and a room Durable Object; audio travels directly between browsers over WebRTC.
+**Duplex supports real 1:1 browser calls.** A participant explicitly joins before the browser requests microphone access. Camera access is opt-in after joining. Signaling travels through the Worker and a room Durable Object; microphone audio, camera video and shared screens travel directly between browsers over WebRTC.
 
-| Area                        | State                                                                      |
-| --------------------------- | -------------------------------------------------------------------------- |
-| Monorepo, tooling, CI       | Done                                                                       |
-| Web app (`/`, `/r/:roomId`) | Create a room, join, share its link, mute, and leave                       |
-| Worker                      | Health endpoint and validated room WebSocket routing                       |
-| `CallRoom` Durable Object   | Two-person presence and WebRTC signaling relay using WebSocket Hibernation |
-| WebRTC package              | Browser-only perfect negotiation, ICE exchange, and direct audio           |
-| Helper (Tauri 2 + Angular)  | Dormant window shell; not involved in calls                                |
+| Area                        | State                                                                          |
+| --------------------------- | ------------------------------------------------------------------------------ |
+| Monorepo, tooling, CI       | Done                                                                           |
+| Web app (`/`, `/r/:roomId`) | Create a room, join, share its link, mute, use camera, share screen, and leave |
+| Worker                      | Health endpoint and validated room WebSocket routing                           |
+| `CallRoom` Durable Object   | Two-person presence and WebRTC signaling relay using WebSocket Hibernation     |
+| WebRTC package              | Browser-only perfect negotiation, ICE exchange, and direct audio/video         |
+| Helper (Tauri 2 + Angular)  | Dormant window shell; not involved in calls                                    |
 
-Not supported yet: camera, screen sharing, TURN fallback, remote control, accounts, chat, or recording.
+Not supported yet: TURN fallback, remote control, multi-user calls, accounts, chat, or recording.
+
+Camera and screen share use one outgoing video source at a time. Starting a screen share temporarily replaces the camera video; stopping it resumes the camera when it is still enabled. Joining does not request camera permission.
 
 ## Signaling and media
 
@@ -26,10 +28,10 @@ Browser A                         Worker                 CallRoom Durable Object
    │                                ├──────── WebSocket ──────────►│                                    │
    │                                │                              ├──────── WebSocket relay ─────────►│
    │                                │                              │                                    │
-   ╞══════════════════════════════════════ WebRTC audio ════════════════════════════════════════════════╡
+   ╞══════════════════════════════════ WebRTC audio + video ════════════════════════════════════════════╡
 ```
 
-The Worker validates the opaque room ID and resolves the Durable Object with `idFromName(roomId)`. `CallRoom` coordinates the join/leave lifecycle and relays validated offer, answer, and ICE messages only to the other participant. The object uses Cloudflare's WebSocket Hibernation API and serialized socket attachments to recover participant identity after hibernation. It holds no media and uses no database; microphone audio flows peer-to-peer.
+The Worker validates the opaque room ID and resolves the Durable Object with `idFromName(roomId)`. `CallRoom` coordinates the join/leave lifecycle and relays validated offer, answer, and ICE messages only to the other participant. The object uses Cloudflare's WebSocket Hibernation API and serialized socket attachments to recover participant identity after hibernation. It holds no media and uses no database; microphone audio, camera and screen video flow peer-to-peer.
 
 Room IDs remain cryptographically random 128-bit tokens created in the browser. A room comes into existence when its Durable Object is first addressed. The room URL is the anonymous capability to enter that ephemeral room.
 

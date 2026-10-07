@@ -32,8 +32,20 @@ class FakeConnection {
   readonly candidates: (RTCIceCandidate | null)[] = [];
   closed = false;
   addTrackCalls = 0;
+  addTransceiverCalls = 0;
+  readonly replacedTracks: (MediaStreamTrack | null)[] = [];
+  readonly videoSender = {
+    replaceTrack: (track: MediaStreamTrack | null) => {
+      this.replacedTracks.push(track);
+      return Promise.resolve();
+    },
+  };
   addTrack(): void {
     this.addTrackCalls += 1;
+  }
+  addTransceiver(): RTCRtpTransceiver {
+    this.addTransceiverCalls += 1;
+    return { sender: this.videoSender } as unknown as RTCRtpTransceiver;
   }
   setLocalDescription(): Promise<void> {
     const type = this.signalingState === 'have-remote-offer' ? 'answer' : 'offer';
@@ -119,5 +131,28 @@ describe('createDuplexPeer', () => {
     expect(connection.remoteDescription).toBeNull();
     expect(connection.candidates).toHaveLength(0);
     peer.close();
+  });
+
+  it('uses one stable video sender to switch camera, screen, and disabled states', async () => {
+    const transport = new FakeTransport();
+    const connection = new FakeConnection();
+    const peer = createDuplexPeer(transport, {
+      polite: true,
+      localStream: createLocalStream(),
+      createPeerConnection: () => connection.asPeerConnection(),
+    });
+    const camera = { kind: 'video' } as MediaStreamTrack;
+    const screen = { kind: 'video' } as MediaStreamTrack;
+
+    await peer.setVideoTrack(camera);
+    await peer.setVideoTrack(screen);
+    await peer.setVideoTrack(camera);
+    await peer.setVideoTrack(null);
+
+    expect(connection.addTransceiverCalls).toBe(1);
+    expect(connection.replacedTracks).toEqual([camera, screen, camera, null]);
+    expect(connection.closed).toBe(false);
+    peer.close();
+    expect(connection.closed).toBe(true);
   });
 });
