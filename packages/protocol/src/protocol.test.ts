@@ -6,6 +6,7 @@ import {
   healthResponseSchema,
   parseDuplexMessage,
   roomIdSchema,
+  serverRoomMessageSchema,
   signalingMessageSchema,
 } from './index';
 
@@ -38,12 +39,40 @@ describe('signaling messages', () => {
     expect(result.success).toBe(true);
   });
 
-  it('rejects a join from a different protocol version', () => {
+  it('parses mismatched protocol versions so the room can return a typed error', () => {
     const result = signalingMessageSchema.safeParse({
       type: 'join',
       payload: { roomId: createRoomId(), protocolVersion: PROTOCOL_VERSION + 1 },
     });
-    expect(result.success).toBe(false);
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts all server room lifecycle messages and rejects malformed or unknown messages', () => {
+    const participantId = 'abcdefghijklmnop';
+    for (const message of [
+      { type: 'joined', payload: { participantId, polite: false, peerPresent: false } },
+      { type: 'peer-joined', payload: { participantId } },
+      { type: 'peer-left', payload: {} },
+      { type: 'room-full', payload: { reason: 'capacity' } },
+      {
+        type: 'protocol-error',
+        payload: {
+          code: 'protocol_mismatch',
+          message: 'Version mismatch',
+          expectedVersion: PROTOCOL_VERSION,
+        },
+      },
+    ]) {
+      expect(serverRoomMessageSchema.safeParse(message).success, message.type).toBe(true);
+    }
+    for (const message of [
+      null,
+      {},
+      { type: 'unknown', payload: {} },
+      { type: 'joined', payload: {} },
+    ]) {
+      expect(serverRoomMessageSchema.safeParse(message).success).toBe(false);
+    }
   });
 
   it('accepts offer, answer, leave and ice candidates', () => {

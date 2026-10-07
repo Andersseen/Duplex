@@ -1,4 +1,5 @@
 import type { DuplexConnectionState } from './connection-state';
+import type { AnswerMessage, IceCandidateMessage, OfferMessage } from '@duplex/protocol';
 
 /** Labels of the RTC data channels Duplex will open. Fixed so both peers agree. */
 export const DATA_CHANNEL_LABELS = {
@@ -30,9 +31,15 @@ export type PeerEvent =
 
 export type PeerEventListener = (event: PeerEvent) => void;
 
+export type PeerSignalingMessage = OfferMessage | AnswerMessage | IceCandidateMessage;
+
+export interface SignalingTransport {
+  send(message: PeerSignalingMessage): void;
+  subscribe(listener: (message: PeerSignalingMessage) => void): () => void;
+}
+
 /**
- * Public contract of a Duplex 1:1 peer. The implementation arrives with the signaling
- * work; consumers (the Angular app) should depend on this interface only.
+ * Public contract of a Duplex 1:1 peer.
  */
 export interface DuplexPeer {
   readonly connectionState: DuplexConnectionState;

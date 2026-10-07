@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Framework-independent browser-side WebRTC foundation for Duplex.",
   "sideEffects": false,
+  "dependencies": {
+    "@duplex/protocol": "workspace:*"
+  },
   "exports": {
     ".": "./src/index.ts"
   },

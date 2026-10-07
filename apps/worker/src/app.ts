@@ -13,10 +13,25 @@ app.get('/health', (c) => {
   return c.json(body);
 });
 
-/**
- * Room namespace. Every request is validated and forwarded to that room's Durable Object;
- * the Worker never holds room state itself. Future: GET /api/rooms/:roomId/ws (signaling).
- */
+/** Room WebSocket signaling endpoint; live room state remains in the Durable Object. */
+app.get('/api/rooms/:roomId/ws', async (c) => {
+  const roomId = roomIdSchema.safeParse(c.req.param('roomId'));
+  if (!roomId.success) {
+    const body: ApiError = { error: 'invalid_room_id', message: 'Invalid room id.' };
+    return c.json(body, 400);
+  }
+  if (c.req.header('Upgrade')?.toLowerCase() !== 'websocket') {
+    const body: ApiError = {
+      error: 'websocket_required',
+      message: 'This endpoint requires a WebSocket upgrade.',
+    };
+    return c.json(body, 426, { Upgrade: 'websocket' });
+  }
+  const stub = c.env.CALL_ROOM.get(c.env.CALL_ROOM.idFromName(roomId.data));
+  return stub.fetch(c.req.raw);
+});
+
+/** Other room-scoped requests also resolve to that room, with no state in this Worker. */
 app.all('/api/rooms/:roomId/*', async (c) => {
   const roomId = roomIdSchema.safeParse(c.req.param('roomId'));
   if (!roomId.success) {
