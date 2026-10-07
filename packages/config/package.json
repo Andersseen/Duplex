@@ -1,0 +1,21 @@
+{
+  "name": "@duplex/config",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared TypeScript and ESLint configuration for the Duplex workspace.",
+  "exports": {
+    "./tsconfig.base.json": "./tsconfig.base.json",
+    "./eslint": "./eslint.mjs",
+    "./eslint-angular": "./eslint-angular.mjs"
+  },
+  "dependencies": {
+    "@eslint/js": "^10.0.1",
+    "angular-eslint": "^22.5.0",
+    "eslint": "^10.12.0",
+    "typescript-eslint": "^8.71.1"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.3"
+  }
+}

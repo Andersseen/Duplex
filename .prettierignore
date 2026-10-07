@@ -1,0 +1,11 @@
+node_modules
+dist
+.turbo
+.angular
+.output
+.wrangler
+pnpm-lock.yaml
+target
+apps/helper/src-tauri/gen
+apps/helper/src-tauri/icons
+apps/helper/src-tauri/Cargo.lock

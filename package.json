@@ -1,0 +1,28 @@
+{
+  "name": "duplex",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Lightweight 1:1 browser calls and screen sharing with an optional native helper for consent-based remote control.",
+  "license": "UNLICENSED",
+  "packageManager": "pnpm@10.30.1",
+  "engines": {
+    "node": ">=22.22.3"
+  },
+  "scripts": {
+    "dev": "turbo run dev --filter=@duplex/web --filter=@duplex/worker",
+    "dev:helper": "pnpm --filter @duplex/helper tauri dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "rust:check": "cargo check --manifest-path apps/helper/src-tauri/Cargo.toml --locked",
+    "rust:fmt:check": "cargo fmt --manifest-path apps/helper/src-tauri/Cargo.toml --check",
+    "rust:clippy": "cargo clippy --manifest-path apps/helper/src-tauri/Cargo.toml --locked -- -D warnings"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.9",
+    "turbo": "^2.11.7"
+  }
+}

@@ -1,0 +1,17 @@
+[package]
+name = "duplex-helper"
+version = "0.0.0"
+description = "Duplex native helper: shell for future consent-based remote control."
+edition = "2021"
+rust-version = "1.77"
+publish = false
+
+[lib]
+name = "duplex_helper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
