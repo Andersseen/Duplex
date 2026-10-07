@@ -19,6 +19,10 @@ export const leaveMessageSchema = z
   .object({ type: z.literal('leave'), payload: z.object({}).strict() })
   .strict();
 
+export const refreshRtcConfigMessageSchema = z
+  .object({ type: z.literal('refresh-rtc-config'), payload: z.object({}).strict() })
+  .strict();
+
 export const offerMessageSchema = z
   .object({
     type: z.literal('offer'),
@@ -56,6 +60,7 @@ export const iceCandidateMessageSchema = z
 export const clientSignalingMessageSchema = z.discriminatedUnion('type', [
   joinMessageSchema,
   leaveMessageSchema,
+  refreshRtcConfigMessageSchema,
   offerMessageSchema,
   answerMessageSchema,
   iceCandidateMessageSchema,
@@ -105,12 +110,34 @@ export const protocolErrorMessageSchema = z
   })
   .strict();
 
+const rtcIceServerSchema = z
+  .object({
+    urls: z.union([z.url(), z.array(z.url()).min(1).max(16)]),
+    username: z.string().min(1).max(256).optional(),
+    credential: z.string().min(1).max(512).optional(),
+  })
+  .strict();
+
+export const rtcConfigMessageSchema = z
+  .object({
+    type: z.literal('rtc-config'),
+    payload: z
+      .object({
+        iceServers: z.array(rtcIceServerSchema).min(1).max(8),
+        expiresAt: z.number().int().positive(),
+        relayAvailable: z.boolean(),
+      })
+      .strict(),
+  })
+  .strict();
+
 export const serverRoomMessageSchema = z.discriminatedUnion('type', [
   joinedMessageSchema,
   peerJoinedMessageSchema,
   peerLeftMessageSchema,
   roomFullMessageSchema,
   protocolErrorMessageSchema,
+  rtcConfigMessageSchema,
 ]);
 
 export const serverSignalingMessageSchema = z.union([
@@ -129,5 +156,6 @@ export type OfferMessage = z.infer<typeof offerMessageSchema>;
 export type AnswerMessage = z.infer<typeof answerMessageSchema>;
 export type IceCandidateMessage = z.infer<typeof iceCandidateMessageSchema>;
 export type SignalingMessage = z.infer<typeof clientSignalingMessageSchema>;
+export type RtcConfigMessage = z.infer<typeof rtcConfigMessageSchema>;
 export type ServerSignalingMessage = z.infer<typeof serverSignalingMessageSchema>;
 export type RoomServerMessage = z.infer<typeof serverRoomMessageSchema>;

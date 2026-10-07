@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:cloudflare": "NITRO_PRESET=cloudflare_module vite build",
+    "deploy": "node ../../scripts/deploy-web.mjs",
     "preview": "vite preview",
     "typecheck": "ngc -p tsconfig.app.json --noEmit && ngc -p tsconfig.spec.json --noEmit",
     "lint": "eslint .",
@@ -32,6 +34,7 @@
     "@angular/build": "^22.2.2",
     "@angular/compiler-cli": "^22.2.1",
     "@duplex/config": "workspace:*",
+    "front-matter": "^4.0.2",
     "@types/node": "^22.19.0",
     "@tailwindcss/vite": "^4.3.3",
     "eslint": "^10.12.0",

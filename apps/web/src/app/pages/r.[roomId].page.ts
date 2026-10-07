@@ -27,7 +27,14 @@ import { CallSessionService } from '../services/call-session.service';
         >Duplex</a
       >
       @if (isActive()) {
-        <span class="text-sm text-zinc-600 dark:text-zinc-400">{{ statusText() }}</span>
+        <div class="flex items-center gap-3">
+          @if (showConnectionPath) {
+            <span class="text-xs text-zinc-500 dark:text-zinc-500">
+              {{ session.connectionPath() }} path
+            </span>
+          }
+          <span class="text-sm text-zinc-600 dark:text-zinc-400">{{ statusText() }}</span>
+        </div>
       }
     </header>
 
@@ -210,6 +217,7 @@ export default class RoomPage implements OnDestroy {
   readonly roomId = input.required<string>();
   protected readonly session = inject(CallSessionService);
   protected readonly copied = signal(false);
+  protected readonly showConnectionPath = import.meta.env.DEV;
   protected readonly isValidRoom = computed(() => roomIdSchema.safeParse(this.roomId()).success);
   protected readonly isActive = computed(() =>
     ['waiting-for-peer', 'connecting', 'connected', 'reconnecting'].includes(this.session.state()),

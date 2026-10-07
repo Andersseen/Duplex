@@ -1,16 +1,28 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const peerHarness = vi.hoisted(() => ({
-  created: [] as { tracks: (MediaStreamTrack | null)[]; close: ReturnType<typeof vi.fn> }[],
+  created: [] as {
+    tracks: (MediaStreamTrack | null)[];
+    close: ReturnType<typeof vi.fn>;
+    options: unknown;
+    updateIceServers: ReturnType<typeof vi.fn>;
+    emit: (event: unknown) => void;
+  }[],
 }));
 
 vi.mock('@duplex/webrtc', () => ({
-  createDuplexPeer: vi.fn(() => {
+  toRtcIceServers: (
+    iceServers: { urls: string | string[]; username?: string; credential?: string }[],
+  ) => iceServers.map((server) => ({ ...server })),
+  createDuplexPeer: vi.fn((_transport: unknown, options: unknown) => {
     const listeners: ((event: unknown) => void)[] = [];
     const peer = {
       tracks: [] as (MediaStreamTrack | null)[],
       close: vi.fn(),
       connectionState: 'connecting',
+      options,
+      updateIceServers: vi.fn(),
+      restartIce: vi.fn(),
       setVideoTrack: vi.fn((track: MediaStreamTrack | null) => {
         peer.tracks.push(track);
         return Promise.resolve();
@@ -18,6 +30,11 @@ vi.mock('@duplex/webrtc', () => ({
       subscribe: (listener: (event: unknown) => void) => {
         listeners.push(listener);
         return () => listeners.splice(listeners.indexOf(listener), 1);
+      },
+      emit: (event: unknown) => {
+        listeners.forEach((listener) => {
+          listener(event);
+        });
       },
     };
     peerHarness.created.push(peer);
@@ -93,6 +110,14 @@ async function joined(service: CallSessionService, peerPresent = false): Promise
     type: 'joined',
     payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent },
   });
+  socket.receive({
+    type: 'rtc-config',
+    payload: {
+      iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+      expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+      relayAvailable: false,
+    },
+  });
   if (peerPresent)
     socket.receive({ type: 'peer-joined', payload: { participantId: 'qrstuvwxyzabcdef' } });
   return socket;
@@ -141,6 +166,94 @@ describe('CallSessionService', () => {
     expect(peerHarness.created).toHaveLength(1);
     expect(service.state()).toBe('connecting');
     service.leave();
+  });
+
+  it('waits for server RTC configuration and passes it into the peer', async () => {
+    const service = joinRoom();
+    await Promise.resolve();
+    const socket = FakeWebSocket.latest;
+    if (!socket) throw new Error('WebSocket was not opened.');
+    socket.receive({
+      type: 'joined',
+      payload: { participantId: 'abcdefghijklmnop', polite: true, peerPresent: true },
+    });
+    socket.receive({ type: 'peer-joined', payload: { participantId: 'qrstuvwxyzabcdef' } });
+    expect(peerHarness.created).toHaveLength(0);
+    socket.receive({
+      type: 'rtc-config',
+      payload: {
+        iceServers: [
+          { urls: ['stun:stun.cloudflare.com:3478'] },
+          {
+            urls: ['turns:turn.cloudflare.com:443?transport=tcp'],
+            username: 'temp',
+            credential: 'temp',
+          },
+        ],
+        expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+        relayAvailable: true,
+      },
+    });
+    expect(peerHarness.created).toHaveLength(1);
+    expect(peerHarness.created[0]?.options).toMatchObject({
+      iceServers: [
+        { urls: ['stun:stun.cloudflare.com:3478'] },
+        {
+          urls: ['turns:turn.cloudflare.com:443?transport=tcp'],
+          username: 'temp',
+          credential: 'temp',
+        },
+      ],
+    });
+    expect(peerHarness.created[0]?.updateIceServers).not.toHaveBeenCalled();
+    service.leave();
+  });
+
+  it('updates existing peer ICE servers on refresh and clears the refresh timer on leave', async () => {
+    vi.useFakeTimers();
+    try {
+      const service = joinRoom();
+      const socket = await joined(service, true);
+      const peer = peerHarness.created[0];
+      expect(peer).toBeDefined();
+      socket.receive({
+        type: 'rtc-config',
+        payload: {
+          iceServers: [
+            {
+              urls: 'turn:turn.cloudflare.com:3478?transport=udp',
+              username: 'new',
+              credential: 'new',
+            },
+          ],
+          expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+          relayAvailable: true,
+        },
+      });
+      expect(peer?.updateIceServers).toHaveBeenCalledWith([
+        { urls: 'turn:turn.cloudflare.com:3478?transport=udp', username: 'new', credential: 'new' },
+      ]);
+      expect(vi.getTimerCount()).toBeGreaterThan(0);
+      service.leave();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('surfaces ICE recovery and connection path, and explains direct failure when relay is unavailable', async () => {
+    const service = joinRoom();
+    await joined(service, true);
+    const peer = peerHarness.created[0];
+    peer?.emit({ type: 'connection-state', state: 'reconnecting' });
+    expect(service.state()).toBe('reconnecting');
+    peer?.emit({ type: 'connection-state', state: 'connected' });
+    expect(service.state()).toBe('connected');
+    peer?.emit({ type: 'connection-path', path: 'direct' });
+    expect(service.connectionPath()).toBe('direct');
+    peer?.emit({ type: 'connection-state', state: 'failed' });
+    expect(service.state()).toBe('failed');
+    expect(service.sessionError()).toContain('TURN relay is unavailable');
   });
 
   it('starts and stops camera without affecting the audio session', async () => {

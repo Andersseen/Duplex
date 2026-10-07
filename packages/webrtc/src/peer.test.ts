@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PeerSignalingMessage, SignalingTransport } from './types';
 import { createDuplexPeer } from './peer';
 
@@ -34,6 +34,9 @@ class FakeConnection {
   addTrackCalls = 0;
   addTransceiverCalls = 0;
   readonly replacedTracks: (MediaStreamTrack | null)[] = [];
+  readonly restarted = { count: 0 };
+  configuration: RTCConfiguration = {};
+  candidateStats: RTCStats[] = [];
   readonly videoSender = {
     replaceTrack: (track: MediaStreamTrack | null) => {
       this.replacedTracks.push(track);
@@ -61,6 +64,20 @@ class FakeConnection {
   addIceCandidate(candidate: RTCIceCandidate | null): Promise<void> {
     this.candidates.push(candidate);
     return Promise.resolve();
+  }
+  getConfiguration(): RTCConfiguration {
+    return this.configuration;
+  }
+  setConfiguration(configuration: RTCConfiguration): void {
+    this.configuration = configuration;
+  }
+  restartIce(): void {
+    this.restarted.count += 1;
+  }
+  getStats(): Promise<RTCStatsReport> {
+    return Promise.resolve(
+      new Map(this.candidateStats.map((stat) => [stat.id, stat])) as unknown as RTCStatsReport,
+    );
   }
   close(): void {
     this.closed = true;
@@ -154,5 +171,129 @@ describe('createDuplexPeer', () => {
     expect(connection.closed).toBe(false);
     peer.close();
     expect(connection.closed).toBe(true);
+  });
+
+  it('uses supplied ICE servers and updates them without rebuilding the peer', () => {
+    const transport = new FakeTransport();
+    const connection = new FakeConnection();
+    const initialIceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+    const peer = createDuplexPeer(transport, {
+      polite: true,
+      localStream: createLocalStream(),
+      iceServers: initialIceServers,
+      createPeerConnection: (configuration) => {
+        connection.configuration = configuration;
+        return connection.asPeerConnection();
+      },
+    });
+    expect(connection.configuration.iceServers).toEqual(initialIceServers);
+    const updated = [
+      { urls: 'turn:turn.cloudflare.com:3478?transport=udp', username: 'user', credential: 'pass' },
+    ];
+    peer.updateIceServers(updated);
+    expect(connection.configuration.iceServers).toEqual(updated);
+    expect(connection.closed).toBe(false);
+    peer.close();
+  });
+
+  it('restarts ICE and retains perfect negotiation for the restart offer', async () => {
+    const transport = new FakeTransport();
+    const connection = new FakeConnection();
+    const peer = createDuplexPeer(transport, {
+      polite: true,
+      localStream: createLocalStream(),
+      createPeerConnection: () => connection.asPeerConnection(),
+    });
+    peer.restartIce();
+    expect(connection.restarted.count).toBe(1);
+    await connection.onnegotiationneeded?.call(
+      connection.asPeerConnection(),
+      new Event('negotiationneeded'),
+    );
+    expect(transport.sent.at(-1)?.type).toBe('offer');
+    peer.close();
+  });
+
+  it('reports direct and relay candidate paths after connection', async () => {
+    for (const [candidateType, expected] of [
+      ['host', 'direct'],
+      ['relay', 'relay'],
+    ] as const) {
+      const transport = new FakeTransport();
+      const connection = new FakeConnection();
+      connection.candidateStats = [
+        {
+          id: 'pair',
+          type: 'candidate-pair',
+          state: 'succeeded',
+          nominated: true,
+          localCandidateId: 'local',
+        } as RTCStats,
+        {
+          id: 'local',
+          type: 'local-candidate',
+          candidateType,
+        } as RTCStats,
+      ];
+      const peer = createDuplexPeer(transport, {
+        polite: true,
+        localStream: createLocalStream(),
+        createPeerConnection: () => connection.asPeerConnection(),
+      });
+      const paths: string[] = [];
+      peer.subscribe((event) => {
+        if (event.type === 'connection-path') paths.push(event.path);
+      });
+      connection.connectionState = 'connected';
+      connection.iceConnectionState = 'connected';
+      connection.onconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('statechange'),
+      );
+      await Promise.resolve();
+      expect(paths.at(-1)).toBe(expected);
+      peer.close();
+    }
+  });
+
+  it('restarts a disconnected ICE session twice at most, then reports failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new FakeTransport();
+      const connection = new FakeConnection();
+      const peer = createDuplexPeer(transport, {
+        polite: true,
+        localStream: createLocalStream(),
+        createPeerConnection: () => connection.asPeerConnection(),
+      });
+      const states: string[] = [];
+      peer.subscribe((event) => {
+        if (event.type === 'connection-state') states.push(event.state);
+      });
+      connection.connectionState = 'connected';
+      connection.iceConnectionState = 'connected';
+      connection.onconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('statechange'),
+      );
+      connection.connectionState = 'connected';
+      connection.iceConnectionState = 'disconnected';
+      connection.onconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('statechange'),
+      );
+      expect(states.at(-1)).toBe('reconnecting');
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(connection.restarted.count).toBe(1);
+      await vi.advanceTimersByTimeAsync(8000);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(connection.restarted.count).toBe(2);
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(states.at(-1)).toBe('failed');
+      peer.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

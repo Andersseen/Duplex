@@ -15,6 +15,9 @@ const peerHarness = vi.hoisted(() => ({
 }));
 
 vi.mock('@duplex/webrtc', () => ({
+  toRtcIceServers: (
+    iceServers: { urls: string | string[]; username?: string; credential?: string }[],
+  ) => iceServers.map((server) => ({ ...server })),
   createDuplexPeer: vi.fn(() => ({
     connectionState: 'connecting',
     subscribe: (
@@ -137,6 +140,14 @@ describe('RoomPage', () => {
       type: 'joined',
       payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: false },
     });
+    socket?.receive({
+      type: 'rtc-config',
+      payload: {
+        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+        expiresAt: Date.now() + 60_000,
+        relayAvailable: false,
+      },
+    });
     fixture.detectChanges();
     expect(element.querySelector('h1')?.textContent).toContain('Waiting for someone');
 
@@ -166,6 +177,14 @@ describe('RoomPage', () => {
     socket?.receive({
       type: 'joined',
       payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: true },
+    });
+    socket?.receive({
+      type: 'rtc-config',
+      payload: {
+        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+        expiresAt: Date.now() + 60_000,
+        relayAvailable: false,
+      },
     });
     peerHarness.listeners[0]?.({ type: 'connection-state', state: 'connected' });
     socket?.receive({ type: 'peer-left', payload: {} });

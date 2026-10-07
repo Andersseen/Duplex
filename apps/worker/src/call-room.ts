@@ -9,6 +9,7 @@ import {
 } from '@duplex/protocol';
 import type { ServerSignalingMessage } from '@duplex/protocol';
 import { z } from 'zod';
+import { generateRtcConfiguration } from './rtc-config';
 
 const MAX_MESSAGE_BYTES = 128 * 1024;
 const attachmentSchema = z
@@ -17,6 +18,7 @@ const attachmentSchema = z
     joined: z.boolean(),
     polite: z.boolean().optional(),
     protocolVersion: z.number().int().positive().optional(),
+    lastRtcConfigIssuedAt: z.number().int().nonnegative().optional(),
   })
   .strict();
 type ParticipantAttachment = z.infer<typeof attachmentSchema>;
@@ -79,7 +81,7 @@ export class CallRoom extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  override webSocketMessage(socket: WebSocket, data: string | ArrayBuffer): void {
+  override async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer): Promise<void> {
     const current = attachment(socket);
     if (!current) {
       socket.close(1008, 'Invalid participant attachment');
@@ -140,12 +142,14 @@ export class CallRoom extends DurableObject {
         joined: true,
         polite: peerPresent,
         protocolVersion: PROTOCOL_VERSION,
+        lastRtcConfigIssuedAt: Date.now(),
       };
       socket.serializeAttachment(updated);
       send(socket, {
         type: 'joined',
         payload: { participantId: updated.participantId, polite: updated.polite, peerPresent },
       });
+      await this.sendRtcConfiguration(socket, updated.participantId);
       if (peerPresent) {
         for (const peer of joined) {
           const peerData = attachment(peer);
@@ -167,9 +171,32 @@ export class CallRoom extends DurableObject {
       socket.close(1000, 'Participant left');
       return;
     }
+    if (message.type === 'refresh-rtc-config') {
+      const lastIssuedAt = current.lastRtcConfigIssuedAt ?? 0;
+      if (Date.now() - lastIssuedAt < 60_000) return;
+      const updated = { ...current, lastRtcConfigIssuedAt: Date.now() };
+      socket.serializeAttachment(updated);
+      await this.sendRtcConfiguration(socket, updated.participantId);
+      return;
+    }
     for (const peer of this.participants()) {
       if (peer !== socket) send(peer, message);
     }
+  }
+
+  private async sendRtcConfiguration(socket: WebSocket, participantId: string): Promise<void> {
+    const config = await generateRtcConfiguration(this.env);
+    const message = {
+      type: 'rtc-config' as const,
+      payload: {
+        iceServers: config.iceServers,
+        expiresAt: config.expiresAt,
+        relayAvailable: config.relayAvailable,
+      },
+    };
+    send(socket, message);
+    if (!config.relayAvailable)
+      console.warn('Participant received STUN-only configuration.', { participantId });
   }
 
   override webSocketClose(socket: WebSocket): void {

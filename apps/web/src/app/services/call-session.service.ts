@@ -1,8 +1,8 @@
 import { Injectable, signal } from '@angular/core';
 import type { OnDestroy } from '@angular/core';
 import { PROTOCOL_VERSION, roomIdSchema, serverSignalingMessageSchema } from '@duplex/protocol';
-import type { ServerSignalingMessage, SignalingMessage } from '@duplex/protocol';
-import { createDuplexPeer } from '@duplex/webrtc';
+import type { RtcConfigMessage, ServerSignalingMessage, SignalingMessage } from '@duplex/protocol';
+import { createDuplexPeer, toRtcIceServers } from '@duplex/webrtc';
 import type { DuplexPeer, PeerSignalingMessage, SignalingTransport } from '@duplex/webrtc';
 
 export type CallState =
@@ -29,6 +29,7 @@ export class CallSessionService implements OnDestroy {
   readonly remoteAudioStream = signal<MediaStream | null>(null);
   readonly remoteVideoStream = signal<MediaStream | null>(null);
   readonly roomUrl = signal('');
+  readonly connectionPath = signal<'direct' | 'relay' | 'unknown'>('unknown');
 
   private socket: WebSocket | null = null;
   private peer: DuplexPeer | null = null;
@@ -40,8 +41,11 @@ export class CallSessionService implements OnDestroy {
   private displayStream: MediaStream | null = null;
   private displayTrack: MediaStreamTrack | null = null;
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
+  private rtcRefreshTimer: ReturnType<typeof setTimeout> | null = null;
   private leaving = false;
   private lastJoined: Extract<ServerSignalingMessage, { type: 'joined' }>['payload'] | null = null;
+  private rtcConfig: RtcConfigMessage['payload'] | null = null;
+  private peerPresent = false;
 
   async join(roomId: string): Promise<void> {
     if (
@@ -56,6 +60,9 @@ export class CallSessionService implements OnDestroy {
     this.screenError.set('');
     this.leaving = false;
     this.lastJoined = null;
+    this.rtcConfig = null;
+    this.peerPresent = false;
+    this.connectionPath.set('unknown');
     this.state.set('requesting-media');
     try {
       this.microphoneStream = await navigator.mediaDevices.getUserMedia({
@@ -71,11 +78,18 @@ export class CallSessionService implements OnDestroy {
 
     this.state.set('joining');
     try {
-      const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const apiOrigin = import.meta.env.VITE_DUPLEX_API_ORIGIN?.replace(/\/+$/, '');
+      const apiUrl = apiOrigin ? new URL(apiOrigin) : null;
+      const scheme = apiUrl
+        ? apiUrl.protocol === 'https:'
+          ? 'wss:'
+          : 'ws:'
+        : location.protocol === 'https:'
+          ? 'wss:'
+          : 'ws:';
+      const host = apiUrl ? apiUrl.host : location.host;
       this.roomUrl.set(location.href);
-      const socket = new WebSocket(
-        `${scheme}//${location.host}/api/rooms/${encodeURIComponent(roomId)}/ws`,
-      );
+      const socket = new WebSocket(`${scheme}//${host}/api/rooms/${encodeURIComponent(roomId)}/ws`);
       this.socket = socket;
       socket.onopen = () => {
         const joinMessage: SignalingMessage = {
@@ -240,12 +254,13 @@ export class CallSessionService implements OnDestroy {
     const message = result.data;
     if (message.type === 'joined') {
       this.lastJoined = message.payload;
+      this.peerPresent = message.payload.peerPresent;
       if (this.timeoutId) clearTimeout(this.timeoutId);
       this.timeoutId = null;
       this.makeTransport();
-      if (message.payload.peerPresent) this.startPeer(message.payload.polite);
-      else this.state.set('waiting-for-peer');
+      if (!message.payload.peerPresent) this.state.set('waiting-for-peer');
     } else if (message.type === 'peer-joined') {
+      this.peerPresent = true;
       if (this.lastJoined) this.startPeer(this.lastJoined.polite);
     } else if (message.type === 'peer-left') {
       this.closePeer();
@@ -259,6 +274,8 @@ export class CallSessionService implements OnDestroy {
           ? 'This Duplex version is not compatible with the room server. Reload the page to update.'
           : message.payload.message,
       );
+    } else if (message.type === 'rtc-config') {
+      this.applyRtcConfiguration(message);
     } else {
       this.transportListener?.(message);
     }
@@ -281,18 +298,35 @@ export class CallSessionService implements OnDestroy {
   }
 
   private startPeer(polite: boolean): void {
-    if (!this.microphoneStream || !this.callTransport || this.peer) return;
+    if (
+      !this.microphoneStream ||
+      !this.callTransport ||
+      !this.rtcConfig ||
+      !this.peerPresent ||
+      this.peer
+    )
+      return;
     this.peer = createDuplexPeer(this.callTransport, {
       polite,
       localStream: this.microphoneStream,
+      iceServers: toRtcIceServers(this.rtcConfig.iceServers),
+      ...(import.meta.env.DEV && import.meta.env.VITE_DUPLEX_FORCE_RELAY === 'true'
+        ? { iceTransportPolicy: 'relay' as const }
+        : {}),
     });
     this.peerUnsubscribe = this.peer.subscribe((event) => {
       if (event.type === 'connection-state') {
         if (event.state === 'connected') this.state.set('connected');
         else if (event.state === 'reconnecting') this.state.set('reconnecting');
         else if (event.state === 'failed')
-          this.fail('The direct peer connection failed. Leave and try again.');
+          this.fail(
+            this.rtcConfig?.relayAvailable
+              ? 'The peer connection could not recover. Leave and try again.'
+              : 'The direct connection failed and TURN relay is unavailable. Check TURN configuration or try another network.',
+          );
         else if (event.state === 'connecting') this.state.set('connecting');
+      } else if (event.type === 'connection-path') {
+        this.connectionPath.set(event.path);
       } else if (event.type === 'remote-media') {
         this.remoteAudioStream.set(event.media.audio);
         this.remoteVideoStream.set(event.media.video);
@@ -305,6 +339,24 @@ export class CallSessionService implements OnDestroy {
         : null;
     if (activeTrack) void this.replaceOutgoingVideo(activeTrack);
     this.state.set('connecting');
+  }
+
+  private applyRtcConfiguration(message: RtcConfigMessage): void {
+    this.rtcConfig = message.payload;
+    this.peer?.updateIceServers(toRtcIceServers(message.payload.iceServers));
+    if (this.rtcRefreshTimer) clearTimeout(this.rtcRefreshTimer);
+    this.rtcRefreshTimer = null;
+    if (message.payload.relayAvailable) {
+      const refreshDelay = Math.max(1000, message.payload.expiresAt - Date.now() - 60 * 60 * 1000);
+      this.rtcRefreshTimer = setTimeout(() => {
+        this.rtcRefreshTimer = null;
+        if (this.socket?.readyState === WebSocket.OPEN)
+          this.socket.send(
+            JSON.stringify({ type: 'refresh-rtc-config', payload: {} } satisfies SignalingMessage),
+          );
+      }, refreshDelay);
+    }
+    if (this.peerPresent && this.lastJoined) this.startPeer(this.lastJoined.polite);
   }
 
   private async replaceOutgoingVideo(track: MediaStreamTrack | null): Promise<void> {
@@ -330,6 +382,7 @@ export class CallSessionService implements OnDestroy {
     this.peer = null;
     this.remoteAudioStream.set(null);
     this.remoteVideoStream.set(null);
+    this.connectionPath.set('unknown');
   }
 
   private fail(message: string): void {
@@ -342,6 +395,8 @@ export class CallSessionService implements OnDestroy {
   private cleanup(stopMedia: boolean): void {
     if (this.timeoutId) clearTimeout(this.timeoutId);
     this.timeoutId = null;
+    if (this.rtcRefreshTimer) clearTimeout(this.rtcRefreshTimer);
+    this.rtcRefreshTimer = null;
     this.closePeer();
     this.transportListener = null;
     this.callTransport = null;

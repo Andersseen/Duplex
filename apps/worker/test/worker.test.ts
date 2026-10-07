@@ -5,7 +5,7 @@ import {
   createRoomId,
   healthResponseSchema,
 } from '@duplex/protocol';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { app } from '../src/app';
 
 describe('GET /health', () => {
@@ -29,14 +29,54 @@ describe('/api/rooms/:roomId/*', () => {
     expect(response.status).toBe(426);
     expect(apiErrorSchema.parse(await response.json()).error).toBe('websocket_required');
   });
+
+  it('allows local origins in development and rejects unapproved production origins', async () => {
+    const roomId = createRoomId();
+    const devResponse = await app.request(
+      `/api/rooms/${roomId}/ws`,
+      { headers: { Upgrade: 'websocket', Origin: 'http://localhost:5173' } },
+      { ...env, ENVIRONMENT: 'development' },
+    );
+    expect(devResponse.status).toBe(101);
+    const devSocket = (devResponse as Response & { webSocket: WebSocket }).webSocket;
+    devSocket.accept();
+    devSocket.close();
+
+    const denied = await app.request(
+      `/api/rooms/${roomId}/ws`,
+      { headers: { Upgrade: 'websocket', Origin: 'https://evil.example' } },
+      { ...env, ENVIRONMENT: 'production', ALLOWED_ORIGINS: 'https://call.example.com' },
+    );
+    expect(denied.status).toBe(403);
+
+    const alternatePath = await app.request(
+      `/api/rooms/${createRoomId()}/not-the-signaling-path`,
+      { headers: { Upgrade: 'websocket', Origin: 'https://evil.example' } },
+      { ...env, ENVIRONMENT: 'production', ALLOWED_ORIGINS: 'https://call.example.com' },
+    );
+    expect(alternatePath.status).toBe(403);
+
+    const allowed = await app.request(
+      `/api/rooms/${createRoomId()}/ws`,
+      { headers: { Upgrade: 'websocket', Origin: 'https://call.example.com' } },
+      { ...env, ENVIRONMENT: 'production', ALLOWED_ORIGINS: 'https://call.example.com' },
+    );
+    expect(allowed.status).toBe(101);
+    const allowedSocket = (allowed as Response & { webSocket: WebSocket }).webSocket;
+    allowedSocket.accept();
+    allowedSocket.close();
+  });
 });
 
 describe('CallRoom WebSocket signaling', () => {
-  async function connect(roomId: string): Promise<WebSocket> {
+  async function connect(
+    roomId: string,
+    environment: Cloudflare.Env = { ...env, ENVIRONMENT: 'development' },
+  ): Promise<WebSocket> {
     const response = await app.request(
       `/api/rooms/${roomId}/ws`,
       { headers: { Upgrade: 'websocket' } },
-      env,
+      environment,
     );
     expect(response.status).toBe(101);
     const socket = (response as Response & { webSocket: WebSocket | null }).webSocket;
@@ -85,6 +125,7 @@ describe('CallRoom WebSocket signaling', () => {
     const firstJoined = nextMessage(first);
     join(first, roomId);
     expect((await firstJoined).type).toBe('joined');
+    expect((await nextMessage(first)).type).toBe('rtc-config');
 
     const second = await connect(roomId);
     const firstPeerJoined = nextMessage(first);
@@ -92,6 +133,7 @@ describe('CallRoom WebSocket signaling', () => {
     join(second, roomId);
     expect((await firstPeerJoined).type).toBe('peer-joined');
     expect((await secondJoined).type).toBe('joined');
+    expect((await nextMessage(second)).type).toBe('rtc-config');
 
     const third = await connect(roomId);
     const full = nextMessage(third);
@@ -117,6 +159,7 @@ describe('CallRoom WebSocket signaling', () => {
     const thirdJoined = nextMessage(replacement);
     join(replacement, roomId);
     expect((await thirdJoined).type).toBe('joined');
+    expect((await nextMessage(replacement)).type).toBe('rtc-config');
     first.close();
     third.close();
     replacement.close();
@@ -135,6 +178,77 @@ describe('CallRoom WebSocket signaling', () => {
     malformed.send('{');
     expect((await malformedEvent).type).toBe('protocol-error');
     malformed.close();
+  });
+
+  it('does not issue credentials before join and returns refreshed config only to a joined participant', async () => {
+    const start = Date.now();
+    const now = vi.spyOn(Date, 'now').mockReturnValue(start);
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      Response.json(
+        {
+          iceServers: [
+            { urls: ['stun:stun.cloudflare.com:3478'] },
+            {
+              urls: ['turn:turn.cloudflare.com:3478?transport=udp'],
+              username: 'temporary-user',
+              credential: 'temporary-password',
+            },
+          ],
+        },
+        { status: 201 },
+      ),
+    );
+    const secretEnv = {
+      ...env,
+      ENVIRONMENT: 'development',
+      TURN_KEY_ID: 'test-key',
+      TURN_KEY_API_TOKEN: 'test-api-token',
+    };
+    try {
+      const roomId = createRoomId();
+      const unjoined = await connect(roomId, secretEnv);
+      const unjoinedError = nextMessage(unjoined);
+      unjoined.send(JSON.stringify({ type: 'refresh-rtc-config', payload: {} }));
+      expect((await unjoinedError).type).toBe('protocol-error');
+      expect(fetchMock).not.toHaveBeenCalled();
+      unjoined.close();
+
+      const validRoomId = createRoomId();
+      const participant = await connect(validRoomId, secretEnv);
+      const initialJoined = nextMessage(participant);
+      participant.send(
+        JSON.stringify({
+          type: 'join',
+          payload: { roomId: validRoomId, protocolVersion: PROTOCOL_VERSION },
+        }),
+      );
+      expect((await initialJoined).type).toBe('joined');
+      const firstConfig = (await nextMessage(participant)) as {
+        type: string;
+        payload: {
+          relayAvailable: boolean;
+          iceServers: { username?: string; credential?: string }[];
+        };
+      };
+      expect(firstConfig.type).toBe('rtc-config');
+      expect(firstConfig.payload.relayAvailable).toBe(false);
+      expect(JSON.stringify(firstConfig)).not.toContain('test-api-token');
+
+      const noRefreshDuringCooldown = expectNoMessage(participant);
+      participant.send(JSON.stringify({ type: 'refresh-rtc-config', payload: {} }));
+      await noRefreshDuringCooldown;
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      now.mockReturnValue(start + 60_001);
+      const refreshed = nextMessage(participant);
+      participant.send(JSON.stringify({ type: 'refresh-rtc-config', payload: {} }));
+      expect((await refreshed).type).toBe('rtc-config');
+      expect(fetchMock).not.toHaveBeenCalled();
+      participant.close();
+    } finally {
+      now.mockRestore();
+      fetchMock.mockRestore();
+    }
   });
 });
 

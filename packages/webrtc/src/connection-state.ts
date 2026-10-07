@@ -13,9 +13,18 @@ export interface RawConnectionStates {
 }
 
 export function deriveConnectionState(raw: RawConnectionStates): DuplexConnectionState {
+  if (raw.connectionState === 'closed') return 'closed';
+  if (
+    raw.hasConnected &&
+    (raw.connectionState === 'disconnected' ||
+      raw.connectionState === 'connecting' ||
+      raw.connectionState === 'failed' ||
+      raw.iceConnectionState === 'disconnected' ||
+      raw.iceConnectionState === 'checking' ||
+      raw.iceConnectionState === 'failed')
+  )
+    return 'reconnecting';
   switch (raw.connectionState) {
-    case 'closed':
-      return 'closed';
     case 'failed':
       return 'failed';
     case 'connected':
