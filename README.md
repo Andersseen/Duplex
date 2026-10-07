@@ -1,85 +1,63 @@
 # Duplex
 
-A lightweight 1:1 browser call and screen-sharing tool with an optional native helper for consent-based remote control.
-
-```
-Open.
-Create link.
-Send link.
-Talk.
-Share.
-Help.
-```
-
-Duplex is deliberately not a conferencing suite: no accounts, no dashboards, no chat. Rooms are ephemeral and hold at most two people.
+Duplex is a lightweight way to start a private 1:1 browser audio call. Create a room link, send it to one person, and talk. Rooms are anonymous, ephemeral, and hold at most two participants.
 
 ## Status
 
-**This iteration is the platform foundation only.** There is no working call yet.
+**Duplex supports real 1:1 audio calls.** A participant explicitly joins before the browser requests microphone access. Signaling travels through the Worker and a room Durable Object; audio travels directly between browsers over WebRTC.
 
-| Area                        | State                                                                 |
-| --------------------------- | --------------------------------------------------------------------- |
-| Monorepo, tooling, CI       | Done                                                                  |
-| Web app (`/`, `/r/:roomId`) | Landing page and a truthful room shell. Nobody is connected.          |
-| Worker (`GET /health`)      | Done                                                                  |
-| `CallRoom` Durable Object   | Class and binding exist; every request returns `501 not_implemented`  |
-| Protocol (Zod schemas)      | Signaling and control message contracts, tested                       |
-| WebRTC package              | Type contracts and connection-state derivation only                   |
-| Helper (Tauri 2 + Angular)  | Window shell only. No commands, no OS input, no permissions requested |
+| Area                        | State                                                                      |
+| --------------------------- | -------------------------------------------------------------------------- |
+| Monorepo, tooling, CI       | Done                                                                       |
+| Web app (`/`, `/r/:roomId`) | Create a room, join, share its link, mute, and leave                       |
+| Worker                      | Health endpoint and validated room WebSocket routing                       |
+| `CallRoom` Durable Object   | Two-person presence and WebRTC signaling relay using WebSocket Hibernation |
+| WebRTC package              | Browser-only perfect negotiation, ICE exchange, and direct audio           |
+| Helper (Tauri 2 + Angular)  | Dormant window shell; not involved in calls                                |
 
-Next: room signaling over WebSocket in the Durable Object, then the WebRTC call itself.
+Not supported yet: camera, screen sharing, TURN fallback, remote control, accounts, chat, or recording.
 
-## Architecture
+## Signaling and media
 
-```
-Analog.js browser app
-        │
-        ├── Cloudflare Worker/Hono
-        │        │
-        │        └── Durable Object per room
-        │
-        └── future direct WebRTC P2P
-
-Tauri helper
-        │
-        └── future optional OS control
+```text
+Browser A                         Worker                 CallRoom Durable Object                    Browser B
+   │                                │                              │                                    │
+   ├────────── WebSocket ──────────►│                              │                                    │
+   │                                ├──────── WebSocket ──────────►│                                    │
+   │                                │                              ├──────── WebSocket relay ─────────►│
+   │                                │                              │                                    │
+   ╞══════════════════════════════════════ WebRTC audio ════════════════════════════════════════════════╡
 ```
 
-- **Browser app** is the whole product. It works without the helper.
-- **Worker** validates the room ID and forwards `/api/rooms/:roomId/*` to that room's Durable Object. It holds no state.
-- **`CallRoom` Durable Object** (one per room, addressed by `idFromName(roomId)`) will own live signaling and control state, in memory only. No database, KV, D1 or any persistence by design.
-- **Media** will flow directly between browsers over WebRTC. TURN (Cloudflare Realtime) is a future extension of the Worker (`/api/rooms` namespace); no credentials exist yet.
-- **Helper** is a separate app, used only if a participant asks for remote control. It is not a background daemon.
+The Worker validates the opaque room ID and resolves the Durable Object with `idFromName(roomId)`. `CallRoom` coordinates the join/leave lifecycle and relays validated offer, answer, and ICE messages only to the other participant. The object uses Cloudflare's WebSocket Hibernation API and serialized socket attachments to recover participant identity after hibernation. It holds no media and uses no database; microphone audio flows peer-to-peer.
 
-### Security assumptions the code is built around
+Room IDs remain cryptographically random 128-bit tokens created in the browser. A room comes into existence when its Durable Object is first addressed. The room URL is the anonymous capability to enter that ephemeral room.
 
-- Room IDs are 128-bit random values (`createRoomId()`, base64url, 22 chars). The Worker rejects anything else.
-- Remote control must be requested, explicitly granted, temporary (`expiresAt` is mandatory) and revocable at any time.
-- The helper will never accept unauthenticated input from the internet; control sessions will use short-lived scoped tokens.
+STUN is used for direct connection setup. There is no TURN fallback yet, so some network combinations may not connect.
 
 ## Repository layout
 
-```
-apps/web        Analog.js + Angular 22, Tailwind CSS 4        (@duplex/web)
-apps/worker     Cloudflare Worker + Hono + Durable Object     (@duplex/worker)
-apps/helper     Tauri 2 + Angular, Rust in src-tauri/          (@duplex/helper)
-packages/protocol  Zod schemas + inferred types, room IDs      (@duplex/protocol)
-packages/webrtc    Browser WebRTC contracts, no Angular        (@duplex/webrtc)
-packages/config    Shared tsconfig base and ESLint configs     (@duplex/config)
+```text
+apps/web           Analog.js + Angular 22 browser app
+apps/worker        Cloudflare Worker, Hono, and Durable Object
+apps/helper        Tauri 2 + Angular shell, dormant
+packages/protocol  Zod wire schemas and room IDs
+packages/webrtc    Browser WebRTC logic, no Angular
+packages/config    Shared TypeScript and ESLint configuration
 ```
 
-Boundaries: `protocol` depends on nothing in the workspace (only Zod). `webrtc` is browser-only and framework-free. Apps depend on packages, never on each other. Workspace packages are consumed as TypeScript source (no build step).
+Boundaries: `protocol` has no framework dependency; `webrtc` owns peer negotiation; `web` owns the UI and WebSocket adapter; `worker` owns room coordination. Apps do not import from other apps.
 
 ## Local development
 
-Prerequisites: Node `>=22.22.3` (see `.nvmrc`) and pnpm 10 (`corepack enable`). The helper additionally needs a Rust toolchain and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/). No environment variables or secrets are required yet.
+Prerequisites: Node `>=22.22.3` (see `.nvmrc`) and pnpm 10 (`corepack enable`). Rust and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) are only needed for the dormant helper.
 
 ```bash
 pnpm install
 pnpm dev            # web on http://localhost:5173 + worker on http://localhost:8787
 ```
 
-The web dev server proxies `/health` and `/api` to the worker. Check it:
+The web dev server proxies `/health` and `/api` to the Worker, including WebSocket upgrades. Check the Worker with:
 
 ```bash
 curl http://localhost:8787/health
@@ -90,10 +68,10 @@ Run parts individually:
 ```bash
 pnpm --filter @duplex/web dev
 pnpm --filter @duplex/worker dev
-pnpm dev:helper     # opens the Tauri window (needs Rust)
+pnpm dev:helper
 ```
 
-### Checks (same as CI)
+### Checks
 
 ```bash
 pnpm format:check
@@ -101,7 +79,7 @@ pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
-# helper Rust side (build the helper frontend first: pnpm --filter @duplex/helper build)
+pnpm --filter @duplex/helper build
 pnpm rust:fmt:check
 pnpm rust:check
 pnpm rust:clippy
@@ -111,4 +89,4 @@ pnpm rust:clippy
 
 ## UI ecosystem note
 
-The intended UI stack is Volt UI, Quartz, Lumen Icons and Angular Movement. Today only `lumen-icons` and `angular-movement` are published to npm, and `lumen-icons@0.2.0` declares an Angular `^21` peer while this repo is on Angular 22. Volt UI and Quartz are not published. Rather than guess at APIs, the UI uses plain Angular and Tailwind. Adopt them once compatible releases exist.
+The intended UI stack is Volt UI, Quartz, Lumen Icons, and Angular Movement. The currently published Angular UI packages do not yet match this repository's Angular 22 baseline, and Volt UI and Quartz are not published. The call UI therefore uses plain Angular and Tailwind until compatible releases exist.

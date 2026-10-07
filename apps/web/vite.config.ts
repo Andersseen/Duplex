@@ -12,7 +12,7 @@ export default defineConfig(() => ({
   server: {
     proxy: {
       '/health': WORKER_ORIGIN,
-      '/api': WORKER_ORIGIN,
+      '/api': { target: WORKER_ORIGIN, ws: true },
     },
   },
   plugins: [analog({ apiPrefix: '/_analog' }), tailwindcss()],

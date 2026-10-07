@@ -9,7 +9,7 @@ export const healthResponseSchema = z.object({
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
 export const apiErrorSchema = z.object({
-  error: z.enum(['not_found', 'invalid_room_id', 'not_implemented']),
+  error: z.enum(['not_found', 'invalid_room_id', 'not_implemented', 'websocket_required']),
   message: z.string(),
 });
 export type ApiError = z.infer<typeof apiErrorSchema>;
