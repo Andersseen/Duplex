@@ -9,3 +9,11 @@ target
 apps/helper/src-tauri/gen
 apps/helper/src-tauri/icons
 apps/helper/src-tauri/Cargo.lock
+
+# Agentyx-managed output (regenerate with `agentyx install`)
+.agentyx.lock.json
+.agents
+.claude
+.codex
+.kimi-code
+.mcp.json
