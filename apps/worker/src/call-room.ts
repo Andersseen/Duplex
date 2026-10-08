@@ -137,10 +137,12 @@ export class CallRoom extends DurableObject {
         return;
       }
       const peerPresent = joined.length > 0;
+      const existingSocket = joined[0];
+      const existingPeer = existingSocket ? attachment(existingSocket) : null;
       const updated = {
         ...current,
         joined: true,
-        polite: peerPresent,
+        polite: peerPresent ? !(existingPeer?.polite ?? false) : false,
         protocolVersion: PROTOCOL_VERSION,
         lastRtcConfigIssuedAt: Date.now(),
       };

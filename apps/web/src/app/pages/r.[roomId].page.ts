@@ -185,6 +185,23 @@ import { CallSessionService } from '../services/call-session.service';
           >
             {{ session.screenSharing() ? 'Stop sharing' : 'Share screen' }}
           </button>
+          @if (session.fileChannelOpen()) {
+            <button
+              type="button"
+              class="rounded-full border border-zinc-300 px-5 py-2.5"
+              (click)="openFilePicker()"
+            >
+              Send file
+            </button>
+            <input
+              #filePicker
+              class="hidden"
+              type="file"
+              multiple
+              aria-label="Choose files to send"
+              (change)="selectFiles($event)"
+            />
+          }
           <button
             type="button"
             class="rounded-full bg-zinc-900 px-5 py-2.5 text-white dark:bg-zinc-50 dark:text-zinc-900"
@@ -193,6 +210,101 @@ import { CallSessionService } from '../services/call-session.service';
             Leave
           </button>
         </div>
+        @if (session.fileTransfers.transfers().length) {
+          <section class="w-full max-w-2xl space-y-3" aria-label="File transfers">
+            @for (transfer of session.fileTransfers.transfers(); track transfer.id) {
+              <article class="rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800">
+                <div class="flex items-start justify-between gap-4">
+                  <div class="min-w-0">
+                    <p class="font-medium">
+                      {{ transfer.direction === 'sending' ? 'Sending' : 'Peer wants to send' }}
+                    </p>
+                    <p class="truncate text-sm text-zinc-600 dark:text-zinc-400">
+                      {{ transfer.name }} · {{ formatSize(transfer.size) }}
+                    </p>
+                  </div>
+                  @if (transfer.state === 'offered') {
+                    <div class="flex gap-2">
+                      <button
+                        type="button"
+                        class="rounded-full border px-4 py-2 text-sm"
+                        (click)="declineFile(transfer.id)"
+                      >
+                        Decline
+                      </button>
+                      <button
+                        type="button"
+                        class="rounded-full bg-zinc-900 px-4 py-2 text-sm text-white dark:bg-zinc-50 dark:text-zinc-900"
+                        (click)="acceptFile(transfer.id)"
+                      >
+                        Accept
+                      </button>
+                    </div>
+                  } @else if (transfer.state === 'transferring') {
+                    <button
+                      type="button"
+                      class="rounded-full border px-4 py-2 text-sm"
+                      (click)="cancelFile(transfer.id)"
+                    >
+                      Cancel
+                    </button>
+                  } @else if (
+                    transfer.state === 'completed' && transfer.direction === 'receiving'
+                  ) {
+                    <div class="flex gap-2">
+                      <a
+                        class="rounded-full bg-zinc-900 px-4 py-2 text-sm text-white dark:bg-zinc-50 dark:text-zinc-900"
+                        [href]="downloadUrl(transfer.id)"
+                        [attr.download]="transfer.name"
+                        >Download</a
+                      >
+                      <button
+                        type="button"
+                        class="rounded-full border px-3 py-1 text-sm"
+                        (click)="dismissTransfer(transfer.id)"
+                        aria-label="Dismiss transfer"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  } @else if (
+                    transfer.state !== 'queued' && transfer.state !== 'waiting-for-acceptance'
+                  ) {
+                    <button
+                      type="button"
+                      class="rounded-full border px-3 py-1 text-sm"
+                      (click)="dismissTransfer(transfer.id)"
+                      aria-label="Dismiss transfer"
+                    >
+                      Dismiss
+                    </button>
+                  }
+                </div>
+                @if (transfer.state === 'transferring') {
+                  <progress
+                    class="mt-3 h-2 w-full accent-zinc-900"
+                    [max]="transfer.size || 1"
+                    [value]="transfer.bytes"
+                    [attr.aria-label]="'Transfer progress for ' + transfer.name"
+                  ></progress>
+                  <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                    {{ Math.round((transfer.bytes / (transfer.size || 1)) * 100) }}%
+                  </p>
+                } @else if (transfer.state === 'completed') {
+                  <p class="mt-2 text-sm text-emerald-700 dark:text-emerald-300">Received</p>
+                } @else if (transfer.error) {
+                  <p role="alert" class="mt-2 text-sm text-rose-700 dark:text-rose-300">
+                    {{ transfer.error }}
+                  </p>
+                } @else if (transfer.state === 'queued') {
+                  <p class="mt-2 text-sm text-zinc-500">Queued</p>
+                } @else if (transfer.state === 'waiting-for-acceptance') {
+                  <p class="mt-2 text-sm text-zinc-500">Waiting for acceptance…</p>
+                }
+              </article>
+            }
+          </section>
+        }
         @if (session.cameraError()) {
           <p role="alert" class="text-sm text-rose-700 dark:text-rose-300">
             {{ session.cameraError() }}
@@ -238,6 +350,8 @@ export default class RoomPage implements OnDestroy {
   private readonly remoteAudio = viewChild<ElementRef<HTMLAudioElement>>('remoteAudio');
   private readonly remoteVideo = viewChild<ElementRef<HTMLVideoElement>>('remoteVideo');
   private readonly localVideo = viewChild<ElementRef<HTMLVideoElement>>('localVideo');
+  private readonly filePickerRef = viewChild<ElementRef<HTMLInputElement>>('filePicker');
+  protected readonly Math = Math;
 
   constructor() {
     effect(() => {
@@ -264,6 +378,37 @@ export default class RoomPage implements OnDestroy {
   }
   protected leave(): void {
     this.session.leave();
+  }
+
+  protected selectFiles(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    if (input.files?.length) this.session.fileTransfers.sendFiles([...input.files]);
+    input.value = '';
+  }
+
+  protected openFilePicker(): void {
+    this.filePickerRef()?.nativeElement.click();
+  }
+
+  protected acceptFile(id: string): void {
+    this.session.fileTransfers.accept(id);
+  }
+  protected declineFile(id: string): void {
+    this.session.fileTransfers.decline(id);
+  }
+  protected cancelFile(id: string): void {
+    this.session.fileTransfers.cancel(id);
+  }
+  protected dismissTransfer(id: string): void {
+    this.session.fileTransfers.dismiss(id);
+  }
+  protected downloadUrl(id: string): string | null {
+    return this.session.fileTransfers.downloadUrl(id);
+  }
+  protected formatSize(size: number): string {
+    return size >= 1024 * 1024
+      ? `${(size / 1024 / 1024).toFixed(1)} MB`
+      : `${(size / 1024).toFixed(0)} KB`;
   }
 
   protected async copyLink(): Promise<void> {

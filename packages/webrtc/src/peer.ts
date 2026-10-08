@@ -1,7 +1,10 @@
 import { deriveConnectionState } from './connection-state';
+import { createDuplexDataChannel } from './data-channel';
+import { DATA_CHANNEL_LABELS } from './types';
 import type { DuplexConnectionState } from './connection-state';
 import type {
   ConnectionPath,
+  DuplexDataChannel,
   DuplexPeer,
   PeerEvent,
   PeerEventListener,
@@ -45,7 +48,27 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
   const listeners = new Set<PeerEventListener>();
   const remoteTracks = new Map<string, MediaStreamTrack>();
   const isConnected = (): boolean =>
-    connection.connectionState === 'connected' && connection.iceConnectionState === 'connected';
+    connection.connectionState === 'connected' &&
+    (connection.iceConnectionState === 'connected' ||
+      connection.iceConnectionState === 'completed');
+  let fileChannel: DuplexDataChannel | null = null;
+  let fileChannelCreated = false;
+  const attachFileChannel = (raw: RTCDataChannel): void => {
+    if (raw.label !== DATA_CHANNEL_LABELS.fileTransfer || fileChannelCreated) {
+      raw.close();
+      return;
+    }
+    fileChannelCreated = true;
+    fileChannel = createDuplexDataChannel(raw);
+    emit({ type: 'data-channel', channel: fileChannel });
+    fileChannel.subscribe((event) => {
+      if (event.type === 'open') {
+        const label = fileChannel?.label;
+        if (label) emit({ type: 'data-channel-open', label });
+      }
+      if (event.type === 'close') fileChannel = null;
+    });
+  };
   const emitRemoteMedia = (): void => {
     const tracks = [...remoteTracks.values()];
     const audioTracks = tracks.filter((track) => track.kind === 'audio');
@@ -63,6 +86,14 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
 
   const emit = (event: PeerEvent): void => {
     for (const listener of listeners) listener(event);
+  };
+  if (!options.polite) {
+    attachFileChannel(
+      connection.createDataChannel(DATA_CHANNEL_LABELS.fileTransfer, { ordered: true }),
+    );
+  }
+  connection.ondatachannel = (event) => {
+    attachFileChannel(event.channel);
   };
   const emitState = (): void => {
     if (isConnected()) {
@@ -301,6 +332,11 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     },
     subscribe(listener: PeerEventListener): () => void {
       listeners.add(listener);
+      if (fileChannel) {
+        listener({ type: 'data-channel', channel: fileChannel });
+        if (fileChannel.state === 'open')
+          listener({ type: 'data-channel-open', label: fileChannel.label });
+      }
       return () => listeners.delete(listener);
     },
     close(): void {
@@ -310,12 +346,15 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
       connection.onnegotiationneeded = null;
       connection.onicecandidate = null;
       connection.ontrack = null;
+      connection.ondatachannel = null;
       connection.onconnectionstatechange = null;
       connection.oniceconnectionstatechange = null;
       if (recoveryTimer) clearTimeout(recoveryTimer);
       if (recoveryCheckTimer) clearTimeout(recoveryCheckTimer);
       recoveryTimer = null;
       recoveryCheckTimer = null;
+      fileChannel?.close();
+      fileChannel = null;
       connection.close();
       for (const track of remoteTracks.values()) {
         track.onmute = null;

@@ -1,4 +1,5 @@
 export * from './control';
+export * from './file-transfer';
 export * from './http';
 export * from './message';
 export * from './room';

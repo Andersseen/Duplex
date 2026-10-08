@@ -54,4 +54,14 @@ describe('deriveConnectionState', () => {
     expect(deriveConnectionState({ ...base, connectionState: 'failed' })).toBe('reconnecting');
     expect(deriveConnectionState({ ...base, connectionState: 'closed' })).toBe('closed');
   });
+
+  it('treats ICE completed as healthy after initial connection and recovery', () => {
+    expect(
+      deriveConnectionState({
+        connectionState: 'connected',
+        iceConnectionState: 'completed',
+        hasConnected: true,
+      }),
+    ).toBe('connected');
+  });
 });

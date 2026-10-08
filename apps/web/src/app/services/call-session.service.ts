@@ -4,6 +4,7 @@ import { PROTOCOL_VERSION, roomIdSchema, serverSignalingMessageSchema } from '@d
 import type { RtcConfigMessage, ServerSignalingMessage, SignalingMessage } from '@duplex/protocol';
 import { createDuplexPeer, toRtcIceServers } from '@duplex/webrtc';
 import type { DuplexPeer, PeerSignalingMessage, SignalingTransport } from '@duplex/webrtc';
+import { FileTransferService } from './file-transfer.service';
 
 export type CallState =
   | 'ready'
@@ -30,10 +31,13 @@ export class CallSessionService implements OnDestroy {
   readonly remoteVideoStream = signal<MediaStream | null>(null);
   readonly roomUrl = signal('');
   readonly connectionPath = signal<'direct' | 'relay' | 'unknown'>('unknown');
+  readonly fileChannelOpen = signal(false);
+  readonly fileTransfers = new FileTransferService();
 
   private socket: WebSocket | null = null;
   private peer: DuplexPeer | null = null;
   private peerUnsubscribe: (() => void) | null = null;
+  private dataChannelUnsubscribe: (() => void) | null = null;
   private callTransport: SignalingTransport | null = null;
   private transportListener: ((message: PeerSignalingMessage) => void) | null = null;
   private microphoneStream: MediaStream | null = null;
@@ -330,6 +334,16 @@ export class CallSessionService implements OnDestroy {
       } else if (event.type === 'remote-media') {
         this.remoteAudioStream.set(event.media.audio);
         this.remoteVideoStream.set(event.media.video);
+      } else if (event.type === 'data-channel') {
+        this.fileTransfers.attachChannel(event.channel);
+        this.dataChannelUnsubscribe?.();
+        this.dataChannelUnsubscribe = event.channel.subscribe((channelEvent) => {
+          if (channelEvent.type === 'open') this.fileChannelOpen.set(true);
+          else if (channelEvent.type === 'close') this.fileChannelOpen.set(false);
+        });
+        this.fileChannelOpen.set(event.channel.state === 'open');
+      } else {
+        this.fileChannelOpen.set(true);
       }
     });
     const activeTrack = this.screenSharing()
@@ -376,6 +390,10 @@ export class CallSessionService implements OnDestroy {
   }
 
   private closePeer(): void {
+    this.dataChannelUnsubscribe?.();
+    this.dataChannelUnsubscribe = null;
+    this.fileChannelOpen.set(false);
+    this.fileTransfers.peerChanged();
     this.peerUnsubscribe?.();
     this.peerUnsubscribe = null;
     this.peer?.close();
@@ -398,6 +416,7 @@ export class CallSessionService implements OnDestroy {
     if (this.rtcRefreshTimer) clearTimeout(this.rtcRefreshTimer);
     this.rtcRefreshTimer = null;
     this.closePeer();
+    this.fileTransfers.destroy();
     this.transportListener = null;
     this.callTransport = null;
     if (this.socket) {

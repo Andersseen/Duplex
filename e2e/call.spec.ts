@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import type { ConsoleMessage, Page } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 
 async function openHydratedPage(page: Page, url: string): Promise<void> {
   const hydrated = new Promise<void>((resolve) => {
@@ -97,6 +98,62 @@ test('forced relay call selects a relay candidate', async ({ browser }) => {
     });
     await expect(first.getByText('relay path')).toBeVisible({ timeout: 15_000 });
     await expect(second.getByText('relay path')).toBeVisible({ timeout: 15_000 });
+  } finally {
+    await Promise.allSettled([firstContext.close(), secondContext.close()]);
+  }
+});
+
+test('peers transfer and download the exact file bytes over the DataChannel', async ({
+  browser,
+}) => {
+  const firstContext = await browser.newContext({ permissions: ['microphone', 'camera'] });
+  const secondContext = await browser.newContext({ permissions: ['microphone', 'camera'] });
+  const first = await firstContext.newPage();
+  const second = await secondContext.newPage();
+  const contents = Buffer.from([0, 1, 2, 3, 13, 10, 127, 128, 254, 255]);
+  try {
+    await openHydratedPage(first, '/');
+    await first.getByRole('button', { name: 'Start a call' }).click();
+    await expect(first).toHaveURL(/\/r\//);
+    const roomUrl = first.url();
+    await first.getByRole('button', { name: 'Join call' }).click();
+    await openHydratedPage(second, roomUrl);
+    await second.getByRole('button', { name: 'Join call' }).click();
+    await expect(first.getByRole('heading', { name: 'Connected' })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(second.getByRole('heading', { name: 'Connected' })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(first.getByRole('button', { name: 'Send file' })).toBeVisible({ timeout: 30_000 });
+    await expect(second.getByRole('button', { name: 'Send file' })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    await first.getByLabel('Choose files to send').setInputFiles({
+      name: 'transfer-fixture.bin',
+      mimeType: 'application/octet-stream',
+      buffer: contents,
+    });
+    await expect(second.getByText('Peer wants to send')).toBeVisible();
+    await expect(second.getByText('transfer-fixture.bin')).toBeVisible();
+    await second.getByRole('button', { name: 'Accept' }).click();
+    const downloadPromise = second.waitForEvent('download');
+    await expect(second.getByRole('link', { name: 'Download' })).toBeVisible({ timeout: 30_000 });
+    await second.getByRole('link', { name: 'Download' }).click();
+    const download = await downloadPromise;
+    const downloadedPath = await download.path();
+    if (!downloadedPath) throw new Error('Playwright did not provide the downloaded file path.');
+    expect(await readFile(downloadedPath)).toEqual(contents);
+
+    await first.getByLabel('Choose files to send').setInputFiles({
+      name: 'declined-fixture.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('decline me'),
+    });
+    await expect(second.getByText('declined-fixture.txt')).toBeVisible();
+    await second.getByRole('button', { name: 'Decline' }).click();
+    await expect(second.getByRole('link', { name: 'Download' })).toHaveCount(1);
   } finally {
     await Promise.allSettled([firstContext.close(), secondContext.close()]);
   }

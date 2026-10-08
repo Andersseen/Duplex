@@ -44,7 +44,13 @@ function validCloudflareIceServers(input: unknown): RtcConfigurationResult['iceS
       hasAuthenticatedTurn = true;
     }
   }
-  return hasCloudflareStun && hasAuthenticatedTurn ? servers : null;
+  return hasCloudflareStun && hasAuthenticatedTurn
+    ? servers.map((server) => ({
+        urls: server.urls,
+        ...(server.username ? { username: server.username } : {}),
+        ...(server.credential ? { credential: server.credential } : {}),
+      }))
+    : null;
 }
 
 export function unavailableRtcConfiguration(now = Date.now()): RtcConfigurationResult {

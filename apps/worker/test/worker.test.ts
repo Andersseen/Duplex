@@ -165,6 +165,52 @@ describe('CallRoom WebSocket signaling', () => {
     replacement.close();
   });
 
+  it('assigns complementary roles from the remaining participant attachment after replacement', async () => {
+    const roomId = createRoomId();
+    const a = await connect(roomId);
+    const aJoined = nextMessage(a);
+    join(a, roomId);
+    const firstRole = (await aJoined) as unknown as { type: string; payload: { polite: boolean } };
+    expect(firstRole.type).toBe('joined');
+    expect(firstRole.payload.polite).toBe(false);
+    await nextMessage(a);
+    const b = await connect(roomId);
+    const aPeerJoined = nextMessage(a);
+    const bJoined = nextMessage(b);
+    join(b, roomId);
+    await aPeerJoined;
+    const secondRole = (await bJoined) as unknown as { type: string; payload: { polite: boolean } };
+    expect(secondRole.type).toBe('joined');
+    expect(secondRole.payload.polite).toBe(true);
+    await nextMessage(b);
+
+    const aLeaves = nextMessage(b);
+    a.close(1000, 'left');
+    expect((await aLeaves).type).toBe('peer-left');
+    const c = await connect(roomId);
+    const bPeerJoined = nextMessage(b);
+    const cJoined = nextMessage(c);
+    join(c, roomId);
+    await bPeerJoined;
+    const cMessage = (await cJoined) as unknown as { payload: { polite: boolean } };
+    expect(cMessage.payload.polite).toBe(false);
+    await nextMessage(c);
+
+    const bLeaves = nextMessage(c);
+    b.close(1000, 'left');
+    expect((await bLeaves).type).toBe('peer-left');
+    const d = await connect(roomId);
+    const cPeerJoined = nextMessage(c);
+    const dJoined = nextMessage(d);
+    join(d, roomId);
+    await cPeerJoined;
+    const dMessage = (await dJoined) as unknown as { payload: { polite: boolean } };
+    expect(dMessage.payload.polite).toBe(true);
+    await nextMessage(d);
+    c.close();
+    d.close();
+  });
+
   it('returns a typed rejection for protocol mismatch and malformed input', async () => {
     const roomId = createRoomId();
     const mismatch = await connect(roomId);

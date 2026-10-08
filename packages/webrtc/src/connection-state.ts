@@ -20,7 +20,7 @@ export function deriveConnectionState(raw: RawConnectionStates): DuplexConnectio
       raw.connectionState === 'connecting' ||
       raw.connectionState === 'failed' ||
       raw.iceConnectionState === 'disconnected' ||
-      raw.iceConnectionState === 'checking' ||
+      (raw.iceConnectionState === 'checking' && raw.connectionState !== 'connected') ||
       raw.iceConnectionState === 'failed')
   )
     return 'reconnecting';
