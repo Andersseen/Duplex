@@ -54,6 +54,7 @@ jobs:
       - run: pnpm rust:fmt:check
       - run: pnpm rust:check
       - run: pnpm rust:clippy
+      - run: cargo test --manifest-path apps/helper/src-tauri/Cargo.toml --locked
 
   browser-e2e:
     name: Browser E2E (Chromium)
