@@ -57,7 +57,8 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     if (
       raw.label !== DATA_CHANNEL_LABELS.fileTransfer &&
       raw.label !== DATA_CHANNEL_LABELS.collaboration &&
-      raw.label !== DATA_CHANNEL_LABELS.pointer
+      raw.label !== DATA_CHANNEL_LABELS.pointer &&
+      raw.label !== DATA_CHANNEL_LABELS.control
     ) {
       raw.close();
       return;
@@ -108,6 +109,7 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
         maxRetransmits: 0,
       }),
     );
+    attachDataChannel(connection.createDataChannel(DATA_CHANNEL_LABELS.control, { ordered: true }));
   }
   connection.ondatachannel = (event) => {
     attachDataChannel(event.channel);

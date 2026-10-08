@@ -4,6 +4,10 @@ import {
   FILE_TRANSFER_PROTOCOL_VERSION,
   COLLABORATION_PROTOCOL_VERSION,
   MAX_FILE_TRANSFER_BYTES,
+  CONTROL_PROTOCOL_VERSION,
+  HELPER_PAIRING_PREFIX,
+  decodeHelperPairingBundle,
+  encodeHelperPairingBundle,
   controlMessageSchema,
   collaborationMessageSchema,
   pointerMessageSchema,
@@ -252,12 +256,28 @@ describe('signaling messages', () => {
 });
 
 describe('control messages', () => {
+  const surfaceId = crypto.randomUUID();
+  const base = { protocolVersion: CONTROL_PROTOCOL_VERSION, surfaceId };
   it('accepts a request, grant, rejection and revocation', () => {
     for (const message of [
-      { type: 'control-request', payload: { requestId, scopes: ['pointer', 'keyboard'] } },
-      { type: 'control-granted', payload: { requestId, scopes: ['pointer'], expiresAt: 1 } },
-      { type: 'control-rejected', payload: { requestId } },
-      { type: 'control-revoked', payload: { requestId, reason: 'user' } },
+      { type: 'control-capability', ...base, helperConnected: true },
+      { type: 'control-request', ...base, requestId, scopes: ['pointer', 'keyboard'] },
+      {
+        type: 'control-granted',
+        ...base,
+        requestId,
+        controlSessionId: crypto.randomUUID(),
+        scopes: ['pointer'],
+        expiresAt: Date.now() + 1000,
+      },
+      { type: 'control-rejected', ...base, requestId },
+      {
+        type: 'control-revoked',
+        ...base,
+        requestId,
+        controlSessionId: crypto.randomUUID(),
+        reason: 'surface-ended',
+      },
     ]) {
       expect(controlMessageSchema.safeParse(message).success, message.type).toBe(true);
     }
@@ -265,10 +285,46 @@ describe('control messages', () => {
 
   it('rejects grants without an expiry, empty scopes and unknown scopes', () => {
     for (const message of [
-      { type: 'control-granted', payload: { requestId, scopes: ['pointer'] } },
-      { type: 'control-request', payload: { requestId, scopes: [] } },
-      { type: 'control-request', payload: { requestId, scopes: ['clipboard'] } },
-      { type: 'control-request', payload: { requestId: 'not-a-uuid', scopes: ['pointer'] } },
+      {
+        type: 'control-granted',
+        ...base,
+        requestId,
+        controlSessionId: crypto.randomUUID(),
+        scopes: ['pointer'],
+      },
+      { type: 'control-request', ...base, requestId, scopes: [] },
+      { type: 'control-request', ...base, requestId, scopes: ['clipboard'] },
+      { type: 'control-request', ...base, requestId: 'not-a-uuid', scopes: ['pointer'] },
+      { type: 'control-request', ...base, requestId, scopes: ['pointer', 'pointer'] },
+      { type: 'control-request', ...base, requestId, scopes: ['pointer'], extra: true },
+      {
+        type: 'control-request',
+        protocolVersion: CONTROL_PROTOCOL_VERSION,
+        requestId,
+        scopes: ['pointer'],
+      },
+      {
+        type: 'control-revoked',
+        ...base,
+        requestId,
+        controlSessionId: crypto.randomUUID(),
+        reason: 'unknown',
+      },
+      {
+        type: 'control-granted',
+        ...base,
+        requestId,
+        controlSessionId: crypto.randomUUID(),
+        scopes: ['pointer'],
+        expiresAt: 0,
+      },
+      {
+        type: 'control-request',
+        ...base,
+        protocolVersion: CONTROL_PROTOCOL_VERSION + 1,
+        requestId,
+        scopes: ['pointer'],
+      },
     ]) {
       expect(controlMessageSchema.safeParse(message).success).toBe(false);
     }
@@ -278,10 +334,45 @@ describe('control messages', () => {
 describe('parseDuplexMessage', () => {
   it('routes both signaling and control messages', () => {
     expect(parseDuplexMessage({ type: 'leave', payload: {} }).success).toBe(true);
-    expect(parseDuplexMessage({ type: 'control-rejected', payload: { requestId } }).success).toBe(
-      true,
-    );
+    expect(
+      parseDuplexMessage({
+        type: 'control-rejected',
+        protocolVersion: CONTROL_PROTOCOL_VERSION,
+        surfaceId: crypto.randomUUID(),
+        requestId,
+      }).success,
+    ).toBe(true);
     expect(parseDuplexMessage({ type: 'nope', payload: {} }).success).toBe(false);
+  });
+});
+
+describe('helper pairing bundle', () => {
+  const bundle = {
+    version: 1 as const,
+    apiOrigin: 'https://api.example.test',
+    roomId: createRoomId(),
+    token: 'A'.repeat(43),
+  };
+  const unchecked = (value: unknown): string =>
+    `${HELPER_PAIRING_PREFIX}${btoa(JSON.stringify(value)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`;
+  it('round-trips a validated portable bundle', () => {
+    const encoded = encodeHelperPairingBundle(bundle);
+    expect(encoded.startsWith(HELPER_PAIRING_PREFIX)).toBe(true);
+    expect(decodeHelperPairingBundle(encoded)).toEqual(bundle);
+  });
+  it.each([
+    'other.prefix.value',
+    `${HELPER_PAIRING_PREFIX}***`,
+    unchecked({ ...bundle, apiOrigin: 'https://api.example.test/path' }),
+    unchecked({ ...bundle, apiOrigin: 'http://api.example.test' }),
+    unchecked({ ...bundle, apiOrigin: 'https://user:pass@api.example.test' }),
+  ])('rejects invalid or unsafe pairing code %s', (value) => {
+    expect(() => decodeHelperPairingBundle(value)).toThrow('Invalid helper pairing code.');
+  });
+  it('allows local development origins', () => {
+    expect(encodeHelperPairingBundle({ ...bundle, apiOrigin: 'http://localhost:8787' })).toContain(
+      HELPER_PAIRING_PREFIX,
+    );
   });
 });
 

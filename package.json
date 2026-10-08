@@ -29,7 +29,9 @@
   "devDependencies": {
     "@agentyx/cli": "^0.9.0",
     "@playwright/test": "^1.64.0",
+    "@types/ws": "^8.18.2",
     "prettier": "^3.9.9",
-    "turbo": "^2.11.7"
+    "turbo": "^2.11.7",
+    "ws": "^8.21.0"
   }
 }

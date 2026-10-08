@@ -292,6 +292,110 @@ import type { NormalizedPoint } from '../services/collaboration.service';
             </button>
           </div>
         }
+        @if (session.screenSharing()) {
+          <section
+            class="w-full max-w-2xl rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800"
+            aria-label="Duplex Helper"
+          >
+            <h2 class="font-medium">Duplex Helper</h2>
+            @if (session.helperConnected()) {
+              <p role="status" class="mt-2 text-sm text-emerald-700 dark:text-emerald-300">
+                Helper connected
+              </p>
+            } @else if (session.helperPairingCode()) {
+              <p class="mt-2 text-sm">Pairing code ready. It expires in 2 minutes.</p>
+              <textarea
+                class="mt-2 w-full rounded-lg border bg-transparent p-2 font-mono text-xs"
+                readonly
+                aria-label="Helper pairing code"
+                [value]="session.helperPairingCode()"
+              ></textarea>
+              <button
+                type="button"
+                class="mt-2 rounded-full border px-4 py-2"
+                (click)="copyHelperCode()"
+              >
+                {{ helperCopied() ? 'Copied' : 'Copy helper code' }}
+              </button>
+            } @else {
+              <p class="mt-2 text-sm text-zinc-600 dark:text-zinc-400">Not connected</p>
+              <button
+                type="button"
+                class="mt-2 rounded-full border px-4 py-2"
+                (click)="session.createHelperPairingCode()"
+              >
+                Create pairing code
+              </button>
+            }
+          </section>
+        }
+        @if (session.collaboration.peerVideoSource() === 'screen' || session.screenSharing()) {
+          <section
+            class="w-full max-w-2xl rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800"
+            aria-label="Assist control"
+          >
+            @if (session.control.session(); as controlSession) {
+              <p role="status" class="font-medium">
+                {{
+                  controlSession.role === 'controller'
+                    ? 'Control granted'
+                    : 'Peer has control permission'
+                }}
+              </p>
+              <p class="mt-1 text-sm">
+                {{ controlSession.scopes.join(' · ') }} · Expires in
+                {{ session.control.remainingSeconds() }} seconds
+              </p>
+              <p class="mt-1 text-xs text-zinc-500">
+                Input execution will be enabled in the next Assist milestone.
+              </p>
+              <button
+                type="button"
+                class="mt-2 rounded-full border px-4 py-2"
+                (click)="session.control.release()"
+              >
+                {{ controlSession.role === 'controller' ? 'Release control' : 'Stop control' }}
+              </button>
+            } @else if (session.control.incomingRequest(); as request) {
+              <div role="alertdialog" aria-label="Control permission request">
+                <p class="font-medium">Peer wants to control this screen</p>
+                <p class="mt-1 text-sm">Requested: {{ request.scopes.join(' · ') }}</p>
+                <p class="mt-1 text-sm">Access expires automatically.</p>
+                <div class="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    class="rounded-full border px-4 py-2"
+                    (click)="session.control.reject()"
+                  >
+                    Reject
+                  </button>
+                  <button
+                    type="button"
+                    class="rounded-full bg-zinc-900 px-4 py-2 text-white dark:bg-zinc-50 dark:text-zinc-900"
+                    (click)="session.control.allow()"
+                  >
+                    Allow
+                  </button>
+                </div>
+              </div>
+            } @else if (session.control.canRequest()) {
+              <p class="font-medium">Assist is available for this shared screen.</p>
+              <p class="mt-1 text-sm">Pointer ✓ · Keyboard ✓</p>
+              <button
+                type="button"
+                class="mt-2 rounded-full border px-4 py-2 disabled:opacity-50"
+                [disabled]="session.control.state() === 'requesting'"
+                (click)="session.control.requestControl()"
+              >
+                {{ session.control.state() === 'requesting' ? 'Request sent' : 'Request control' }}
+              </button>
+            } @else {
+              <p class="text-sm">
+                Remote control unavailable until the screen sharer pairs Duplex Helper.
+              </p>
+            }
+          </section>
+        }
         @if (session.fileTransfers.transfers().length) {
           <section class="w-full max-w-2xl space-y-3" aria-label="File transfers">
             @for (transfer of session.fileTransfers.transfers(); track transfer.id) {
@@ -411,6 +515,7 @@ export default class RoomPage implements OnDestroy {
   readonly roomId = input.required<string>();
   protected readonly session = inject(CallSessionService);
   protected readonly copied = signal(false);
+  protected readonly helperCopied = signal(false);
   protected readonly overlay = signal({
     left: 0,
     top: 0,
@@ -686,6 +791,14 @@ export default class RoomPage implements OnDestroy {
     } catch {
       // The visible readonly URL remains selectable when clipboard access is unavailable.
     }
+  }
+
+  protected async copyHelperCode(): Promise<void> {
+    this.helperCopied.set(await this.session.copyHelperPairingCode());
+    if (this.helperCopied())
+      setTimeout(() => {
+        this.helperCopied.set(false);
+      }, 2000);
   }
 
   ngOnDestroy(): void {

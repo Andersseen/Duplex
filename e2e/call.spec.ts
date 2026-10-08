@@ -1,6 +1,8 @@
 import { expect, test } from '@playwright/test';
 import type { ConsoleMessage, Page } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
+import WebSocket from 'ws';
+import { decodeHelperPairingBundle } from '@duplex/protocol';
 
 async function openHydratedPage(page: Page, url: string): Promise<void> {
   const hydrated = new Promise<void>((resolve) => {
@@ -165,6 +167,115 @@ test('peers collaborate over WebRTC while a synthetic screen is shared', async (
     await expect(first.getByLabel('Screen collaboration tools')).toHaveCount(0);
     await expect(second.getByLabel('Screen collaboration tools')).toHaveCount(0, { timeout: 5000 });
   } finally {
+    await Promise.allSettled([firstContext.close(), secondContext.close()]);
+  }
+});
+
+test('Assist pairs one helper and negotiates temporary control over the real room and WebRTC', async ({
+  browser,
+}) => {
+  const firstContext = await browser.newContext({ permissions: ['microphone', 'camera'] });
+  const secondContext = await browser.newContext({ permissions: ['microphone', 'camera'] });
+  const syntheticScreen = async (): Promise<void> => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas 2D is unavailable.');
+    context.fillStyle = '#f4f4f5';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {
+      configurable: true,
+      value: async () => canvas.captureStream(15),
+    });
+  };
+  await firstContext.addInitScript(syntheticScreen);
+  await secondContext.addInitScript(syntheticScreen);
+  const first = await firstContext.newPage();
+  const second = await secondContext.newPage();
+  let helper: WebSocket | null = null;
+  try {
+    await openHydratedPage(first, '/');
+    await first.getByRole('button', { name: 'Start a call' }).click();
+    await expect(first).toHaveURL(/\/r\//);
+    const roomUrl = first.url();
+    await first.getByRole('button', { name: 'Join call' }).click();
+    await openHydratedPage(second, roomUrl);
+    await second.getByRole('button', { name: 'Join call' }).click();
+    await expect(first.getByRole('heading', { name: 'Connected' })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(second.getByRole('heading', { name: 'Connected' })).toBeVisible({
+      timeout: 30_000,
+    });
+
+    await first.getByRole('button', { name: 'Share screen' }).click();
+    await expect(first.getByLabel('Duplex Helper')).toBeVisible();
+    await first.getByRole('button', { name: 'Create pairing code' }).click();
+    const codeField = first.getByLabel('Helper pairing code');
+    await expect(codeField).toBeVisible();
+    const pairing = decodeHelperPairingBundle(await codeField.inputValue());
+    const endpoint = new URL(`/api/rooms/${pairing.roomId}/helper/ws`, pairing.apiOrigin);
+    endpoint.protocol = endpoint.protocol === 'https:' ? 'wss:' : 'ws:';
+    helper = new WebSocket(endpoint, { headers: { Authorization: `Bearer ${pairing.token}` } });
+    await new Promise<void>((resolve, reject) => {
+      helper?.once('open', () => resolve());
+      helper?.once('error', reject);
+    });
+    helper.send(JSON.stringify({ type: 'helper-ready' }));
+    await expect(first.getByText('Helper connected')).toBeVisible({ timeout: 10_000 });
+    await expect(second.getByRole('button', { name: 'Request control' })).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(second.locator('body')).not.toContainText(pairing.token);
+
+    const nextHelperMessage = (type: string): Promise<Record<string, unknown>> =>
+      new Promise((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error(`Timed out waiting for ${type}.`)),
+          10_000,
+        );
+        const onMessage = (data: WebSocket.RawData): void => {
+          const message = JSON.parse(data.toString()) as Record<string, unknown>;
+          if (message['type'] !== type) return;
+          clearTimeout(timeout);
+          helper?.off('message', onMessage);
+          resolve(message);
+        };
+        helper?.on('message', onMessage);
+      });
+
+    await second.getByRole('button', { name: 'Request control' }).click();
+    await expect(
+      first.getByRole('alertdialog', { name: 'Control permission request' }),
+    ).toBeVisible();
+    const authorizedResult = nextHelperMessage('helper-session-authorized');
+    await first.getByRole('button', { name: 'Allow' }).click();
+    await expect(second.getByText('Control granted')).toBeVisible();
+    await expect(first.getByText('Peer has control permission')).toBeVisible();
+    const authorized = await authorizedResult;
+    expect(authorized['session']).toMatchObject({ scopes: ['pointer', 'keyboard'] });
+
+    const revoked = nextHelperMessage('helper-session-revoked');
+    await first.getByRole('button', { name: 'Stop control' }).click();
+    await expect(second.getByText('Control granted')).toHaveCount(0);
+    expect((await revoked)['type']).toBe('helper-session-revoked');
+
+    const replay = new WebSocket(endpoint, {
+      headers: { Authorization: `Bearer ${pairing.token}` },
+    });
+    const replayStatus = await new Promise<number>((resolve, reject) => {
+      replay.once('unexpected-response', (_request, response) => {
+        response.resume();
+        resolve(response.statusCode ?? 0);
+      });
+      replay.once('error', (error) => {
+        if (!replay.listenerCount('unexpected-response')) reject(error);
+      });
+    });
+    expect(replayStatus).toBe(401);
+  } finally {
+    helper?.close();
     await Promise.allSettled([firstContext.close(), secondContext.close()]);
   }
 });
