@@ -73,6 +73,102 @@ test('two browser contexts can call, change media, and release room capacity', a
   }
 });
 
+test('peers collaborate over WebRTC while a synthetic screen is shared', async ({ browser }) => {
+  const firstContext = await browser.newContext({ permissions: ['microphone', 'camera'] });
+  const secondContext = await browser.newContext({ permissions: ['microphone', 'camera'] });
+  const syntheticScreen = async (): Promise<void> => {
+    const canvas = document.createElement('canvas');
+    canvas.width = 1280;
+    canvas.height = 720;
+    const context = canvas.getContext('2d');
+    if (!context) throw new Error('Canvas 2D is unavailable.');
+    context.fillStyle = '#f4f4f5';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.fillStyle = '#18181b';
+    context.font = '48px sans-serif';
+    context.fillText('Duplex synthetic share', 80, 120);
+    const animate = (): void => {
+      context.fillStyle = '#f4f4f5';
+      context.fillRect(0, 680, canvas.width, 40);
+      context.fillStyle = '#2563eb';
+      context.fillRect((Date.now() / 8) % canvas.width, 690, 24, 20);
+      requestAnimationFrame(animate);
+    };
+    requestAnimationFrame(animate);
+    Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {
+      configurable: true,
+      value: async () => canvas.captureStream(15),
+    });
+  };
+  await firstContext.addInitScript(syntheticScreen);
+  await secondContext.addInitScript(syntheticScreen);
+  const first = await firstContext.newPage();
+  const second = await secondContext.newPage();
+  try {
+    await openHydratedPage(first, '/');
+    await first.getByRole('button', { name: 'Start a call' }).click();
+    await expect(first).toHaveURL(/\/r\//);
+    const roomUrl = first.url();
+    await first.getByRole('button', { name: 'Join call' }).click();
+    await openHydratedPage(second, roomUrl);
+    await second.getByRole('button', { name: 'Join call' }).click();
+    await expect(first.getByRole('heading', { name: 'Connected' })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(second.getByRole('heading', { name: 'Connected' })).toBeVisible({
+      timeout: 30_000,
+    });
+    await expect(first.getByLabel('Screen collaboration tools')).toHaveCount(0);
+
+    await first.getByRole('button', { name: 'Share screen' }).click();
+    await expect(first.getByLabel('Screen collaboration tools')).toBeVisible();
+    await expect(second.getByLabel('Screen collaboration tools')).toBeVisible({ timeout: 15_000 });
+
+    const remoteScreen = second.getByLabel('Peer video or shared screen');
+    await expect.poll(() => remoteScreen.evaluate((video) => video.videoWidth)).toBeGreaterThan(0);
+    const bounds = await remoteScreen.boundingBox();
+    if (!bounds) throw new Error('Remote shared video is not laid out.');
+    await second.getByRole('button', { name: 'Pointer' }).click();
+    await expect(second.getByRole('button', { name: 'Pointer' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await second.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+    await expect(
+      first.locator('svg[aria-label="Shared screen collaboration surface"] circle'),
+    ).toBeVisible({
+      timeout: 5000,
+    });
+
+    await second.getByRole('button', { name: 'Draw' }).click();
+    await second.mouse.move(bounds.x + bounds.width * 0.35, bounds.y + bounds.height * 0.4);
+    await second.mouse.down();
+    await second.mouse.move(bounds.x + bounds.width * 0.65, bounds.y + bounds.height * 0.6, {
+      steps: 8,
+    });
+    await second.mouse.up();
+    await expect(
+      second.locator('svg[aria-label="Shared screen collaboration surface"] path'),
+    ).toHaveCount(1);
+    await expect(
+      first.locator('svg[aria-label="Shared screen collaboration surface"] path'),
+    ).toHaveCount(1, { timeout: 5000 });
+    await first.getByRole('button', { name: 'Clear' }).click();
+    await expect(
+      first.locator('svg[aria-label="Shared screen collaboration surface"] path'),
+    ).toHaveCount(0);
+    await expect(
+      second.locator('svg[aria-label="Shared screen collaboration surface"] path'),
+    ).toHaveCount(0);
+
+    await first.getByRole('button', { name: 'Stop sharing' }).click();
+    await expect(first.getByLabel('Screen collaboration tools')).toHaveCount(0);
+    await expect(second.getByLabel('Screen collaboration tools')).toHaveCount(0, { timeout: 5000 });
+  } finally {
+    await Promise.allSettled([firstContext.close(), secondContext.close()]);
+  }
+});
+
 test('forced relay call selects a relay candidate', async ({ browser }) => {
   test.skip(
     process.env.DUPLEX_E2E_TURN !== 'true',

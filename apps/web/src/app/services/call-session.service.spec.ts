@@ -5,6 +5,7 @@ const peerHarness = vi.hoisted(() => ({
     tracks: (MediaStreamTrack | null)[];
     close: ReturnType<typeof vi.fn>;
     options: unknown;
+    signaling: unknown[];
     updateIceServers: ReturnType<typeof vi.fn>;
     emit: (event: unknown) => void;
   }[],
@@ -14,13 +15,21 @@ vi.mock('@duplex/webrtc', () => ({
   toRtcIceServers: (
     iceServers: { urls: string | string[]; username?: string; credential?: string }[],
   ) => iceServers.map((server) => ({ ...server })),
-  createDuplexPeer: vi.fn((_transport: unknown, options: unknown) => {
+  createDuplexPeer: vi.fn((transport: unknown, options: unknown) => {
     const listeners: ((event: unknown) => void)[] = [];
+    const signaling: unknown[] = [];
+    const signalTransport = transport as {
+      subscribe: (listener: (message: unknown) => void) => () => void;
+    };
+    const unsubscribeSignaling = signalTransport.subscribe((message) => {
+      signaling.push(message);
+    });
     const peer = {
       tracks: [] as (MediaStreamTrack | null)[],
-      close: vi.fn(),
+      close: vi.fn(unsubscribeSignaling),
       connectionState: 'connecting',
       options,
+      signaling,
       updateIceServers: vi.fn(),
       restartIce: vi.fn(),
       setVideoTrack: vi.fn((track: MediaStreamTrack | null) => {
@@ -206,6 +215,31 @@ describe('CallSessionService', () => {
       ],
     });
     expect(peerHarness.created[0]?.updateIceServers).not.toHaveBeenCalled();
+    service.leave();
+  });
+
+  it('delivers signaling received before RTC configuration creates the peer', async () => {
+    const service = joinRoom();
+    await Promise.resolve();
+    const socket = FakeWebSocket.latest;
+    if (!socket) throw new Error('WebSocket was not opened.');
+    socket.receive({
+      type: 'joined',
+      payload: { participantId: 'abcdefghijklmnop', polite: true, peerPresent: true },
+    });
+    socket.receive({ type: 'offer', payload: { sdp: 'v=0 early-offer' } });
+    expect(peerHarness.created).toHaveLength(0);
+    socket.receive({
+      type: 'rtc-config',
+      payload: {
+        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+        expiresAt: Date.now() + 12 * 60 * 60 * 1000,
+        relayAvailable: false,
+      },
+    });
+    expect(peerHarness.created[0]?.signaling).toEqual([
+      { type: 'offer', payload: { sdp: 'v=0 early-offer' } },
+    ]);
     service.leave();
   });
 

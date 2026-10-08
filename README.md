@@ -4,21 +4,25 @@ Duplex is a lightweight way to start a private 1:1 browser call. Create a room l
 
 ## Status
 
-**Duplex supports reliable 1:1 browser calls and peer-to-peer file transfer.** A participant explicitly joins before the browser requests microphone access. Camera access is opt-in after joining. Signaling travels through the Worker and a room Durable Object. WebRTC prefers a direct connection and uses Cloudflare Realtime TURN as a relay when NAT or firewall rules block direct connectivity.
+**Duplex supports 1:1 browser calls, screen sharing, peer-to-peer file transfer, and live screen collaboration.** A participant explicitly joins before the browser requests microphone access. Camera access is opt-in after joining. Signaling travels through the Worker and a room Durable Object. WebRTC prefers a direct connection and uses Cloudflare Realtime TURN as a relay when NAT or firewall rules block direct connectivity.
 
-| Area                        | State                                                                               |
-| --------------------------- | ----------------------------------------------------------------------------------- |
-| Monorepo, tooling, CI       | Done                                                                                |
-| Web app (`/`, `/r/:roomId`) | Create a room, join, share its link, mute, camera, screen, and send files           |
-| Worker                      | Health endpoint, validated WebSocket origins, and short-lived ICE configuration     |
-| `CallRoom` Durable Object   | Two-person presence and WebRTC signaling relay using WebSocket Hibernation          |
-| WebRTC package              | Perfect negotiation, ICE recovery, path diagnostics, media and reliable DataChannel |
-| File transfer               | Explicit receiver consent, progress, cancellation, and browser download             |
-| Helper (Tauri 2 + Angular)  | Dormant window shell; not involved in calls                                         |
+| Area                        | State                                                                            |
+| --------------------------- | -------------------------------------------------------------------------------- |
+| Monorepo, tooling, CI       | Done                                                                             |
+| Web app (`/`, `/r/:roomId`) | Create a room, join, share its link, audio, mute, camera, screen, and send files |
+| Worker                      | Health endpoint, validated WebSocket origins, and short-lived ICE configuration  |
+| `CallRoom` Durable Object   | Two-person presence and WebRTC signaling relay using WebSocket Hibernation       |
+| WebRTC package              | Perfect negotiation, ICE recovery, path diagnostics, and dedicated DataChannels  |
+| Network                     | Direct WebRTC with Cloudflare STUN and TURN relay fallback                       |
+| File transfer               | Explicit receiver consent, progress, cancellation, and browser download          |
+| Screen collaboration        | Peer pointer, laser pointer, and shared-screen annotations                       |
+| Helper (Tauri 2 + Angular)  | Dormant window shell; not involved in calls                                      |
 
-Not supported yet: remote control, multi-user calls, accounts, chat, or recording.
+Not supported yet: real mouse or keyboard control, Tauri remote control, clipboard sync, recording, chat, multi-user calls, or accounts.
 
 File contents travel directly between peers over a reliable WebRTC DataChannel. Duplex servers do not receive or store file contents. The receiver must accept each offer before bytes are sent. Browser-memory assembly limits transfers to 256 MiB. Transfers cannot resume after a disconnect.
+
+Pointer, laser, and annotation events also travel directly between browsers over dedicated WebRTC DataChannels. Collaboration is ephemeral, bound to a cryptographically identified screen-sharing surface, and is not relayed or stored server-side. The screen overlay never changes the outgoing media stream.
 
 Camera and screen share use one outgoing video source at a time. Starting a screen share temporarily replaces the camera video; stopping it resumes the camera when it is still enabled. Joining does not request camera permission.
 
@@ -31,7 +35,7 @@ Browser A                         Worker                 CallRoom Durable Object
    │                                ├──────── WebSocket ──────────►│                                    │
    │                                │                              ├──────── WebSocket relay ─────────►│
    │                                │                              │                                    │
-   ╞══════════════════════════ WebRTC media + file DataChannel ══════════════════════════════════════════╡
+   ╞════════════ WebRTC media + file, collaboration, and pointer DataChannels ════════════════════════════╡
 ```
 
 The Worker validates the opaque room ID and resolves the Durable Object with `idFromName(roomId)`. `CallRoom` coordinates the join/leave lifecycle, sends each joined participant temporary ICE configuration, and relays validated offer, answer, and ICE messages only to the other participant. Cloudflare's long-lived TURN key stays in Worker secrets. The object uses WebSocket Hibernation and serialized socket attachments to recover participant identity and refresh limits after hibernation. It holds no media and uses no database.

@@ -6,11 +6,16 @@ import type { RtcConfigMessage } from '@duplex/protocol';
 export const DATA_CHANNEL_LABELS = {
   /** Reliable, ordered peer-to-peer file transfer. */
   fileTransfer: 'duplex-file-transfer',
+  /** Reliable, ordered state and annotation messages. */
+  collaboration: 'duplex-collaboration',
+  /** Ephemeral pointer updates that favor freshness over delivery. */
+  pointer: 'duplex-pointer',
   /** Control negotiation relayed peer to peer once remote control exists. */
   control: 'duplex-control',
 } as const;
 
 export type DataChannelLabel = (typeof DATA_CHANNEL_LABELS)[keyof typeof DATA_CHANNEL_LABELS];
+export type DuplexOwnedDataChannelLabel = Exclude<DataChannelLabel, 'duplex-control'>;
 
 export interface RemoteMedia {
   readonly audio: MediaStream | null;
