@@ -59,6 +59,13 @@ export class CollaborationService {
   private strokeFlushTimer: ReturnType<typeof setTimeout> | null = null;
   private pendingStroke: { id: string; points: NormalizedPoint[] } | null = null;
   private totalPoints = 0;
+  private peerMediaListener: ((source: VideoSource, surfaceId: string | null) => void) | null =
+    null;
+
+  setPeerMediaListener(listener: (source: VideoSource, surfaceId: string | null) => void): void {
+    this.peerMediaListener = listener;
+    listener(this.peerVideoSource(), this.peerSurfaceId());
+  }
 
   attachChannel(channel: DuplexDataChannel): void {
     if (channel.label === DATA_CHANNEL_LABELS.collaboration) {
@@ -223,6 +230,7 @@ export class CollaborationService {
     this.detachPointerChannel();
     this.peerVideoSource.set('none');
     this.peerSurfaceId.set(null);
+    this.peerMediaListener?.('none', null);
     this.resetSurfaceState();
     this.lastPeerSequence = -1;
   }
@@ -248,6 +256,7 @@ export class CollaborationService {
       const changed = this.peerSurfaceId() !== message.surfaceId;
       this.peerVideoSource.set(message.videoSource);
       this.peerSurfaceId.set(message.surfaceId);
+      this.peerMediaListener?.(message.videoSource, message.surfaceId);
       if (changed) this.resetSurfaceState();
       return;
     }

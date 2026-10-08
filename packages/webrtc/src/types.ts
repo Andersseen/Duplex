@@ -15,7 +15,7 @@ export const DATA_CHANNEL_LABELS = {
 } as const;
 
 export type DataChannelLabel = (typeof DATA_CHANNEL_LABELS)[keyof typeof DATA_CHANNEL_LABELS];
-export type DuplexOwnedDataChannelLabel = Exclude<DataChannelLabel, 'duplex-control'>;
+export type DuplexOwnedDataChannelLabel = DataChannelLabel;
 
 export interface RemoteMedia {
   readonly audio: MediaStream | null;

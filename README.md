@@ -4,7 +4,7 @@ Duplex is a lightweight way to start a private 1:1 browser call. Create a room l
 
 ## Status
 
-**Duplex supports 1:1 browser calls, screen sharing, peer-to-peer file transfer, and live screen collaboration.** A participant explicitly joins before the browser requests microphone access. Camera access is opt-in after joining. Signaling travels through the Worker and a room Durable Object. WebRTC prefers a direct connection and uses Cloudflare Realtime TURN as a relay when NAT or firewall rules block direct connectivity.
+**Duplex supports 1:1 browser calls, screen sharing, peer-to-peer file transfer, live screen collaboration, and temporary Assist permission negotiation.** A participant explicitly joins before the browser requests microphone access. Camera access is opt-in after joining. Signaling travels through the Worker and a room Durable Object. WebRTC prefers a direct connection and uses Cloudflare Realtime TURN as a relay when NAT or firewall rules block direct connectivity.
 
 | Area                        | State                                                                            |
 | --------------------------- | -------------------------------------------------------------------------------- |
@@ -16,13 +16,17 @@ Duplex is a lightweight way to start a private 1:1 browser call. Create a room l
 | Network                     | Direct WebRTC with Cloudflare STUN and TURN relay fallback                       |
 | File transfer               | Explicit receiver consent, progress, cancellation, and browser download          |
 | Screen collaboration        | Peer pointer, laser pointer, and shared-screen annotations                       |
-| Helper (Tauri 2 + Angular)  | Dormant window shell; not involved in calls                                      |
+| Assist                      | Explicit request/allow/reject, scoped temporary sessions tied to a screen ID     |
+| Native helper pairing       | One-use room and participant scoped credential over authenticated WebSocket      |
+| Helper (Tauri 2 + Angular)  | Rust-owned secure WebSocket and session status UI; no OS input execution         |
 
-Not supported yet: real mouse or keyboard control, Tauri remote control, clipboard sync, recording, chat, multi-user calls, or accounts.
+Native OS mouse and keyboard execution is **not implemented yet**. Assist currently negotiates permission only. Clipboard sync, recording, chat, multi-user calls, and accounts are also unsupported.
+
+Helper pairing and control permission are separate. Pairing identifies the local native helper; it does not grant the peer permission. A control session requires a peer request, the screen sharer's explicit **Allow**, an active matching shared-screen surface, and a temporary scoped grant that expires automatically. Either participant can stop or release it. Each helper pairing code is a two-minute, one-use secret; only its SHA-256 hash is retained in the Durable Object attachment. The helper connects over secure WebSocket and receives session metadata only after browser consent.
 
 File contents travel directly between peers over a reliable WebRTC DataChannel. Duplex servers do not receive or store file contents. The receiver must accept each offer before bytes are sent. Browser-memory assembly limits transfers to 256 MiB. Transfers cannot resume after a disconnect.
 
-Pointer, laser, and annotation events also travel directly between browsers over dedicated WebRTC DataChannels. Collaboration is ephemeral, bound to a cryptographically identified screen-sharing surface, and is not relayed or stored server-side. The screen overlay never changes the outgoing media stream.
+Pointer, laser, and annotation events also travel directly between browsers over dedicated WebRTC DataChannels. Assist negotiation uses its own reliable, ordered `duplex-control` DataChannel and carries no input events. Collaboration and control are ephemeral and bound to a cryptographically identified screen-sharing surface. The screen overlay never changes the outgoing media stream.
 
 Camera and screen share use one outgoing video source at a time. Starting a screen share temporarily replaces the camera video; stopping it resumes the camera when it is still enabled. Joining does not request camera permission.
 
@@ -51,7 +55,7 @@ See [Deployment](./DEPLOYMENT.md) for Cloudflare setup, production deploys, and 
 ```text
 apps/web           Analog.js + Angular 22 browser app
 apps/worker        Cloudflare Worker, Hono, and Durable Object
-apps/helper        Tauri 2 + Angular shell, dormant
+apps/helper        Tauri 2 + Angular UI and Rust-owned helper WebSocket
 packages/protocol  Zod wire schemas and room IDs
 packages/webrtc    Browser WebRTC logic, no Angular
 packages/config    Shared TypeScript and ESLint configuration
@@ -97,7 +101,7 @@ pnpm rust:clippy
 pnpm e2e
 ```
 
-The Playwright E2E suite starts the real local Analog app, Worker, and Durable Object. It uses Chromium's fake microphone and camera. Normal E2E requires no Cloudflare credentials. For a real relay check, configure local TURN secrets and run `pnpm e2e:turn`.
+The Playwright E2E suite starts the real local Analog app, Worker, and Durable Object. It uses Chromium's fake microphone and camera. The Assist E2E opens an authenticated test helper WebSocket, then exercises request, allow, authorization, revoke, and token replay rejection. Normal E2E requires no Cloudflare credentials. For a real relay check, configure local TURN secrets and run `pnpm e2e:turn`.
 
 `pnpm format` rewrites files with Prettier.
 

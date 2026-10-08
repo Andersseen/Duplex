@@ -2,6 +2,7 @@ export * from './control';
 export * from './collaboration';
 export * from './file-transfer';
 export * from './http';
+export * from './helper';
 export * from './message';
 export * from './room';
 export * from './signaling';

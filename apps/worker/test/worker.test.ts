@@ -85,10 +85,10 @@ describe('CallRoom WebSocket signaling', () => {
     return socket;
   }
 
-  function nextMessage(socket: WebSocket): Promise<{ type: string }> {
+  function nextMessage(socket: WebSocket, label = 'room message'): Promise<{ type: string }> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
-        reject(new Error('Timed out waiting for room message.'));
+        reject(new Error(`Timed out waiting for ${label}.`));
       }, 1000);
       socket.addEventListener(
         'message',
@@ -224,6 +224,190 @@ describe('CallRoom WebSocket signaling', () => {
     malformed.send('{');
     expect((await malformedEvent).type).toBe('protocol-error');
     malformed.close();
+  });
+
+  it('issues one-use pairing credentials only to the owner and excludes helpers from room capacity', async () => {
+    const roomId = createRoomId();
+    const unjoined = await connect(roomId);
+    const unjoinedResponse = nextMessage(unjoined);
+    unjoined.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    expect((await unjoinedResponse).type).toBe('protocol-error');
+    unjoined.close();
+    const owner = await connect(roomId);
+    const joined = nextMessage(owner);
+    join(owner, roomId);
+    await joined;
+    await nextMessage(owner);
+    const peer = await connect(roomId);
+    const peerJoined = nextMessage(peer);
+    const ownerPeerJoined = nextMessage(owner);
+    join(peer, roomId);
+    await Promise.all([peerJoined, ownerPeerJoined]);
+    await nextMessage(peer);
+
+    const noPeerLeak = expectNoMessage(peer);
+    const credentialResult = nextMessage(owner, 'helper-pairing-created');
+    owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    const pairing = (await credentialResult) as {
+      type: string;
+      payload: { token: string; expiresAt: number };
+    };
+    expect(pairing.type).toBe('helper-pairing-created');
+    expect(pairing.payload.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(pairing.payload.expiresAt).toBeGreaterThan(Date.now());
+    await noPeerLeak;
+
+    const replacementCredential = nextMessage(owner, 'replacement helper-pairing-created');
+    owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    const replacementPairing = (await replacementCredential) as {
+      type: string;
+      payload: { token: string; expiresAt: number };
+    };
+    expect(replacementPairing.payload.token).not.toBe(pairing.payload.token);
+    const invalidated = await app.request(
+      `/api/rooms/${roomId}/helper/ws`,
+      { headers: { Upgrade: 'websocket', Authorization: `Bearer ${pairing.payload.token}` } },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    expect(invalidated.status).toBe(401);
+    const wrongRoom = await app.request(
+      `/api/rooms/${createRoomId()}/helper/ws`,
+      {
+        headers: {
+          Upgrade: 'websocket',
+          Authorization: `Bearer ${replacementPairing.payload.token}`,
+        },
+      },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    expect(wrongRoom.status).toBe(401);
+
+    const paired = nextMessage(owner, 'helper-paired');
+    const helperResponse = await app.request(
+      `/api/rooms/${roomId}/helper/ws`,
+      {
+        headers: {
+          Upgrade: 'websocket',
+          Authorization: `Bearer ${replacementPairing.payload.token}`,
+        },
+      },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    expect(helperResponse.status).toBe(101);
+    const helper = (helperResponse as Response & { webSocket: WebSocket }).webSocket;
+    helper.accept();
+    expect((await paired).type).toBe('helper-paired');
+
+    helper.send(JSON.stringify({ type: 'helper-ready' }));
+    const controlSessionId = crypto.randomUUID();
+    const surfaceId = crypto.randomUUID();
+    const authorization = nextMessage(helper, 'helper-session-authorized');
+    const noAuthorizationLeak = expectNoMessage(peer);
+    owner.send(
+      JSON.stringify({
+        type: 'helper-session-authorized',
+        session: {
+          controlSessionId,
+          surfaceId,
+          scopes: ['pointer'],
+          expiresAt: Date.now() + 60_000,
+        },
+      }),
+    );
+    expect((await authorization).type).toBe('helper-session-authorized');
+    await noAuthorizationLeak;
+    const revocation = nextMessage(helper, 'helper-session-revoked');
+    owner.send(
+      JSON.stringify({ type: 'helper-session-revoked', controlSessionId, reason: 'user' }),
+    );
+    expect((await revocation).type).toBe('helper-session-revoked');
+
+    const replay = await app.request(
+      `/api/rooms/${roomId}/helper/ws`,
+      {
+        headers: {
+          Upgrade: 'websocket',
+          Authorization: `Bearer ${replacementPairing.payload.token}`,
+        },
+      },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    expect(replay.status).toBe(401);
+    await expectNoMessage(peer);
+
+    const third = await connect(roomId);
+    const roomFull = nextMessage(third);
+    join(third, roomId);
+    expect((await roomFull).type).toBe('room-full');
+    const disconnect = nextMessage(owner, 'helper-disconnected');
+    helper.close(1000, 'test done');
+    expect((await disconnect).type).toBe('helper-disconnected');
+    owner.close();
+    peer.close();
+    third.close();
+  });
+
+  it('rejects expired helper pairing credentials', async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const roomId = createRoomId();
+      const owner = await connect(roomId);
+      const joined = nextMessage(owner);
+      join(owner, roomId);
+      await joined;
+      await nextMessage(owner);
+      const created = nextMessage(owner, 'helper-pairing-created');
+      owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+      const pairing = (await created) as { type: string; payload: { token: string } };
+      clock.mockReturnValue(now + 2 * 60 * 1000 + 1);
+      const expired = await app.request(
+        `/api/rooms/${roomId}/helper/ws`,
+        { headers: { Upgrade: 'websocket', Authorization: `Bearer ${pairing.payload.token}` } },
+        { ...env, ENVIRONMENT: 'production' },
+      );
+      expect(expired.status).toBe(401);
+      owner.close();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it('closes the paired helper when its owner explicitly leaves the room', async () => {
+    const roomId = createRoomId();
+    const owner = await connect(roomId);
+    const joined = nextMessage(owner);
+    join(owner, roomId);
+    await joined;
+    await nextMessage(owner);
+    const pairingCreated = nextMessage(owner, 'helper-pairing-created');
+    owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    const pairing = (await pairingCreated) as { type: string; payload: { token: string } };
+    const paired = nextMessage(owner, 'helper-paired');
+    const response = await app.request(
+      `/api/rooms/${roomId}/helper/ws`,
+      { headers: { Upgrade: 'websocket', Authorization: `Bearer ${pairing.payload.token}` } },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    expect(response.status).toBe(101);
+    const helper = (response as Response & { webSocket: WebSocket }).webSocket;
+    helper.accept();
+    await paired;
+    const helperClosed = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Owner leave did not close its helper.'));
+      }, 1000);
+      helper.addEventListener(
+        'close',
+        () => {
+          clearTimeout(timeout);
+          resolve();
+        },
+        { once: true },
+      );
+    });
+    owner.send(JSON.stringify({ type: 'leave', payload: {} }));
+    await helperClosed;
   });
 
   it('does not issue credentials before join and returns refreshed config only to a joined participant', async () => {
