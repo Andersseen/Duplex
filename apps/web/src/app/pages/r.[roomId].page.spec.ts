@@ -20,6 +20,12 @@ const peerHarness = vi.hoisted(() => ({
 }));
 
 vi.mock('@duplex/webrtc', () => ({
+  DATA_CHANNEL_LABELS: {
+    fileTransfer: 'duplex-file-transfer',
+    collaboration: 'duplex-collaboration',
+    pointer: 'duplex-pointer',
+    control: 'duplex-control',
+  },
   toRtcIceServers: (
     iceServers: { urls: string | string[]; username?: string; credential?: string }[],
   ) => iceServers.map((server) => ({ ...server })),

@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   PROTOCOL_VERSION,
   FILE_TRANSFER_PROTOCOL_VERSION,
+  COLLABORATION_PROTOCOL_VERSION,
   MAX_FILE_TRANSFER_BYTES,
   controlMessageSchema,
+  collaborationMessageSchema,
+  pointerMessageSchema,
+  MAX_COLLABORATION_BATCH_POINTS,
   createRoomId,
   fileTransferMessageSchema,
   healthResponseSchema,
@@ -46,6 +50,111 @@ describe('file-transfer messages', () => {
           protocolVersion: FILE_TRANSFER_PROTOCOL_VERSION,
         }).success,
       ).toBe(true);
+  });
+});
+
+describe('collaboration messages', () => {
+  const surfaceId = crypto.randomUUID();
+  const strokeId = crypto.randomUUID();
+  const base = { protocolVersion: COLLABORATION_PROTOCOL_VERSION };
+
+  it('enforces explicit screen identity and strict media state', () => {
+    expect(
+      collaborationMessageSchema.safeParse({
+        type: 'media-state',
+        ...base,
+        videoSource: 'screen',
+        surfaceId,
+      }).success,
+    ).toBe(true);
+    for (const [videoSource, id] of [
+      ['screen', null],
+      ['camera', surfaceId],
+      ['none', surfaceId],
+    ])
+      expect(
+        collaborationMessageSchema.safeParse({
+          type: 'media-state',
+          ...base,
+          videoSource,
+          surfaceId: id,
+        }).success,
+      ).toBe(false);
+    expect(
+      collaborationMessageSchema.safeParse({
+        type: 'media-state',
+        ...base,
+        videoSource: 'none',
+        surfaceId: null,
+        extra: true,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('validates bounded stroke messages, clear messages, and UUIDs', () => {
+    const point = { x: 0.42, y: 0.73 };
+    const messages = [
+      { type: 'stroke-start', ...base, surfaceId, strokeId, point },
+      {
+        type: 'stroke-points',
+        ...base,
+        surfaceId,
+        strokeId,
+        points: [point],
+      },
+      { type: 'stroke-end', ...base, surfaceId, strokeId },
+      { type: 'annotations-clear', ...base, surfaceId },
+    ];
+    for (const message of messages)
+      expect(collaborationMessageSchema.safeParse(message).success).toBe(true);
+    expect(
+      collaborationMessageSchema.safeParse({
+        type: 'stroke-points',
+        ...base,
+        surfaceId,
+        strokeId,
+        points: Array.from({ length: MAX_COLLABORATION_BATCH_POINTS + 1 }, () => point),
+      }).success,
+    ).toBe(false);
+    expect(
+      collaborationMessageSchema.safeParse({
+        type: 'stroke-start',
+        ...base,
+        surfaceId: 'bad',
+        strokeId,
+        point,
+      }).success,
+    ).toBe(false);
+    expect(
+      collaborationMessageSchema.safeParse({
+        ...messages[0],
+        protocolVersion: COLLABORATION_PROTOCOL_VERSION + 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('validates normalized pointer bounds, sequence numbers, and strict fields', () => {
+    const pointer = {
+      type: 'pointer',
+      ...base,
+      surfaceId,
+      mode: 'pointer',
+      x: 0.42,
+      y: 0.73,
+      sequence: 42,
+    };
+    expect(pointerMessageSchema.safeParse(pointer).success).toBe(true);
+    expect(pointerMessageSchema.safeParse({ ...pointer, x: 1.01 }).success).toBe(false);
+    expect(pointerMessageSchema.safeParse({ ...pointer, sequence: -1 }).success).toBe(false);
+    expect(pointerMessageSchema.safeParse({ ...pointer, extra: true }).success).toBe(false);
+    expect(
+      pointerMessageSchema.safeParse({
+        type: 'pointer-hide',
+        ...base,
+        surfaceId,
+        sequence: 43,
+      }).success,
+    ).toBe(true);
   });
 });
 

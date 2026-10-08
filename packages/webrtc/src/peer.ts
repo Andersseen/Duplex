@@ -5,6 +5,7 @@ import type { DuplexConnectionState } from './connection-state';
 import type {
   ConnectionPath,
   DuplexDataChannel,
+  DuplexOwnedDataChannelLabel,
   DuplexPeer,
   PeerEvent,
   PeerEventListener,
@@ -51,22 +52,29 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     connection.connectionState === 'connected' &&
     (connection.iceConnectionState === 'connected' ||
       connection.iceConnectionState === 'completed');
-  let fileChannel: DuplexDataChannel | null = null;
-  let fileChannelCreated = false;
-  const attachFileChannel = (raw: RTCDataChannel): void => {
-    if (raw.label !== DATA_CHANNEL_LABELS.fileTransfer || fileChannelCreated) {
+  const dataChannels = new Map<DuplexOwnedDataChannelLabel, DuplexDataChannel>();
+  const attachDataChannel = (raw: RTCDataChannel): void => {
+    if (
+      raw.label !== DATA_CHANNEL_LABELS.fileTransfer &&
+      raw.label !== DATA_CHANNEL_LABELS.collaboration &&
+      raw.label !== DATA_CHANNEL_LABELS.pointer
+    ) {
       raw.close();
       return;
     }
-    fileChannelCreated = true;
-    fileChannel = createDuplexDataChannel(raw);
-    emit({ type: 'data-channel', channel: fileChannel });
-    fileChannel.subscribe((event) => {
+    const label = raw.label;
+    if (dataChannels.has(label)) {
+      raw.close();
+      return;
+    }
+    const channel = createDuplexDataChannel(raw);
+    dataChannels.set(label, channel);
+    emit({ type: 'data-channel', channel });
+    channel.subscribe((event) => {
       if (event.type === 'open') {
-        const label = fileChannel?.label;
-        if (label) emit({ type: 'data-channel-open', label });
+        emit({ type: 'data-channel-open', label });
       }
-      if (event.type === 'close') fileChannel = null;
+      if (event.type === 'close' && dataChannels.get(label) === channel) dataChannels.delete(label);
     });
   };
   const emitRemoteMedia = (): void => {
@@ -88,12 +96,21 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     for (const listener of listeners) listener(event);
   };
   if (!options.polite) {
-    attachFileChannel(
+    attachDataChannel(
       connection.createDataChannel(DATA_CHANNEL_LABELS.fileTransfer, { ordered: true }),
+    );
+    attachDataChannel(
+      connection.createDataChannel(DATA_CHANNEL_LABELS.collaboration, { ordered: true }),
+    );
+    attachDataChannel(
+      connection.createDataChannel(DATA_CHANNEL_LABELS.pointer, {
+        ordered: false,
+        maxRetransmits: 0,
+      }),
     );
   }
   connection.ondatachannel = (event) => {
-    attachFileChannel(event.channel);
+    attachDataChannel(event.channel);
   };
   const emitState = (): void => {
     if (isConnected()) {
@@ -212,6 +229,9 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     connection.addTrack(track, options.localStream);
 
   connection.onnegotiationneeded = async () => {
+    // The impolite peer owns initial offer creation. Waiting for that offer prevents both
+    // participants from racing an initial offer while the polite peer is being set up.
+    if (options.polite && !connection.remoteDescription) return;
     try {
       makingOffer = true;
       await connection.setLocalDescription();
@@ -332,10 +352,9 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     },
     subscribe(listener: PeerEventListener): () => void {
       listeners.add(listener);
-      if (fileChannel) {
-        listener({ type: 'data-channel', channel: fileChannel });
-        if (fileChannel.state === 'open')
-          listener({ type: 'data-channel-open', label: fileChannel.label });
+      for (const channel of dataChannels.values()) {
+        listener({ type: 'data-channel', channel });
+        if (channel.state === 'open') listener({ type: 'data-channel-open', label: channel.label });
       }
       return () => listeners.delete(listener);
     },
@@ -353,8 +372,8 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
       if (recoveryCheckTimer) clearTimeout(recoveryCheckTimer);
       recoveryTimer = null;
       recoveryCheckTimer = null;
-      fileChannel?.close();
-      fileChannel = null;
+      for (const channel of dataChannels.values()) channel.close();
+      dataChannels.clear();
       connection.close();
       for (const track of remoteTracks.values()) {
         track.onmute = null;

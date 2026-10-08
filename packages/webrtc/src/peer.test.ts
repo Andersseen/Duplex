@@ -65,6 +65,7 @@ class FakeConnection {
   readonly replacedTracks: (MediaStreamTrack | null)[] = [];
   readonly restarted = { count: 0 };
   readonly dataChannels: FakeDataChannel[] = [];
+  readonly dataChannelOptions: (RTCDataChannelInit | undefined)[] = [];
   configuration: RTCConfiguration = {};
   candidateStats: RTCStats[] = [];
   readonly videoSender = {
@@ -81,7 +82,7 @@ class FakeConnection {
     return { sender: this.videoSender } as unknown as RTCRtpTransceiver;
   }
   createDataChannel(label: string, options?: RTCDataChannelInit): RTCDataChannel {
-    expect(options?.ordered).toBe(true);
+    this.dataChannelOptions.push(options);
     const channel = new FakeDataChannel(label);
     this.dataChannels.push(channel);
     return channel as unknown as RTCDataChannel;
@@ -129,7 +130,7 @@ function createLocalStream(): MediaStream {
 }
 
 describe('createDuplexPeer', () => {
-  it('offers after negotiation is needed and answers a remote offer', async () => {
+  it('waits for the impolite peer offer and answers it on the polite side', async () => {
     const transport = new FakeTransport();
     const connection = new FakeConnection();
     const remoteCandidate = { candidate: 'candidate:1' } as RTCIceCandidate;
@@ -144,7 +145,7 @@ describe('createDuplexPeer', () => {
       connection.asPeerConnection(),
       new Event('negotiationneeded'),
     );
-    expect(transport.sent[0]?.type).toBe('offer');
+    expect(transport.sent).toEqual([]);
     transport.receive({ type: 'offer', payload: { sdp: 'v=0 remote' } });
     await Promise.resolve();
     await Promise.resolve();
@@ -167,6 +168,22 @@ describe('createDuplexPeer', () => {
     expect(transport.sent.at(-1)).toEqual({ type: 'ice-candidate', payload: { candidate: null } });
     peer.close();
     expect(connection.closed).toBe(true);
+  });
+
+  it('lets the impolite peer create the initial offer', async () => {
+    const transport = new FakeTransport();
+    const connection = new FakeConnection();
+    const peer = createDuplexPeer(transport, {
+      polite: false,
+      localStream: createLocalStream(),
+      createPeerConnection: () => connection.asPeerConnection(),
+    });
+    await connection.onnegotiationneeded?.call(
+      connection.asPeerConnection(),
+      new Event('negotiationneeded'),
+    );
+    expect(transport.sent[0]?.type).toBe('offer');
+    peer.close();
   });
 
   it('queues ICE until remote description and ignores colliding offers when impolite', async () => {
@@ -209,22 +226,29 @@ describe('createDuplexPeer', () => {
     expect(connection.closed).toBe(true);
   });
 
-  it('creates exactly one reliable channel on the impolite side and accepts it on the polite side', () => {
+  it('creates dedicated channels with their delivery semantics and accepts each label once', () => {
     const ownerConnection = new FakeConnection();
     const owner = createDuplexPeer(new FakeTransport(), {
       polite: false,
       localStream: createLocalStream(),
       createPeerConnection: () => ownerConnection.asPeerConnection(),
     });
-    expect(ownerConnection.dataChannels).toHaveLength(1);
+    expect(ownerConnection.dataChannels).toHaveLength(3);
     expect(ownerConnection.dataChannels[0]?.label).toBe('duplex-file-transfer');
+    expect(ownerConnection.dataChannels[1]?.label).toBe('duplex-collaboration');
+    expect(ownerConnection.dataChannels[2]?.label).toBe('duplex-pointer');
+    expect(ownerConnection.dataChannelOptions).toEqual([
+      { ordered: true },
+      { ordered: true },
+      { ordered: false, maxRetransmits: 0 },
+    ]);
     const ownerEvents: string[] = [];
     let ownerChannel: DuplexDataChannel | undefined;
     const received: (string | ArrayBuffer)[] = [];
     owner.subscribe((event) => {
       if (event.type === 'data-channel') {
         ownerEvents.push('channel');
-        ownerChannel = event.channel;
+        if (event.channel.label === 'duplex-file-transfer') ownerChannel = event.channel;
         event.channel.subscribe((channelEvent) => {
           if (channelEvent.type === 'message') received.push(channelEvent.data);
         });
@@ -234,7 +258,7 @@ describe('createDuplexPeer', () => {
     const raw = ownerConnection.dataChannels[0];
     if (!raw) throw new Error('Impolite peer did not create its file channel.');
     raw.open();
-    expect(ownerEvents).toEqual(['channel', 'open']);
+    expect(ownerEvents).toEqual(['channel', 'channel', 'channel', 'open']);
     ownerChannel?.sendText('control');
     const bytes = new Uint8Array([1, 2, 3]).buffer;
     ownerChannel?.sendBinary(bytes);
@@ -250,25 +274,37 @@ describe('createDuplexPeer', () => {
       createPeerConnection: () => politeConnection.asPeerConnection(),
     });
     expect(politeConnection.dataChannels).toHaveLength(0);
-    let accepted = 0;
+    const accepted: string[] = [];
     polite.subscribe((event) => {
-      if (event.type === 'data-channel') accepted += 1;
+      if (event.type === 'data-channel') accepted.push(event.channel.label);
     });
-    const incoming = new FakeDataChannel('duplex-file-transfer');
+    const incoming = ['duplex-file-transfer', 'duplex-collaboration', 'duplex-pointer'].map(
+      (label) => new FakeDataChannel(label),
+    );
+    for (const channel of incoming)
+      politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
+        channel: channel as unknown as RTCDataChannel,
+      } as RTCDataChannelEvent);
+    expect(accepted).toEqual(incoming.map((channel) => channel.label));
+    expect(incoming[0]?.binaryType).toBe('arraybuffer');
+    const duplicate = new FakeDataChannel('duplex-pointer');
     politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
-      channel: incoming as unknown as RTCDataChannel,
+      channel: duplicate as unknown as RTCDataChannel,
     } as RTCDataChannelEvent);
-    expect(accepted).toBe(1);
-    expect(incoming.binaryType).toBe('arraybuffer');
+    const unknown = new FakeDataChannel('unknown');
     politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
-      channel: new FakeDataChannel('duplex-file-transfer') as unknown as RTCDataChannel,
+      channel: unknown as unknown as RTCDataChannel,
     } as RTCDataChannelEvent);
-    expect(accepted).toBe(1);
+    expect(accepted).toHaveLength(3);
+    expect(duplicate.readyState).toBe('closed');
+    expect(unknown.readyState).toBe('closed');
     expect(politeConnection.closed).toBe(false);
     owner.close();
     polite.close();
-    expect(raw.readyState).toBe('closed');
-    expect(incoming.readyState).toBe('closed');
+    expect(ownerConnection.dataChannels.every((channel) => channel.readyState === 'closed')).toBe(
+      true,
+    );
+    expect(incoming.every((channel) => channel.readyState === 'closed')).toBe(true);
 
     const replacementConnection = new FakeConnection();
     const replacement = createDuplexPeer(new FakeTransport(), {
@@ -276,7 +312,7 @@ describe('createDuplexPeer', () => {
       localStream: createLocalStream(),
       createPeerConnection: () => replacementConnection.asPeerConnection(),
     });
-    expect(replacementConnection.dataChannels).toHaveLength(1);
+    expect(replacementConnection.dataChannels).toHaveLength(3);
     expect(replacementConnection.dataChannels[0]).not.toBe(raw);
     replacement.close();
   });
@@ -312,6 +348,7 @@ describe('createDuplexPeer', () => {
       localStream: createLocalStream(),
       createPeerConnection: () => connection.asPeerConnection(),
     });
+    connection.remoteDescription = { type: 'offer', sdp: 'v=0 remote' } as RTCSessionDescription;
     peer.restartIce();
     expect(connection.restarted.count).toBe(1);
     await connection.onnegotiationneeded?.call(

@@ -12,6 +12,8 @@ import type { ElementRef, OnDestroy } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { roomIdSchema } from '@duplex/protocol';
 import { CallSessionService } from '../services/call-session.service';
+import { clientToNormalized, containedVideoRect } from '../collaboration/screen-geometry';
+import type { NormalizedPoint } from '../services/collaboration.service';
 
 @Component({
   selector: 'dx-room-page',
@@ -46,33 +48,85 @@ import { CallSessionService } from '../services/call-session.service';
         "
         aria-label="Video call"
       >
-        <video
-          #remoteVideo
-          autoplay
-          playsinline
-          [class.hidden]="!session.remoteVideoStream()"
-          class="max-h-[70vh] w-full object-contain"
-          aria-label="Peer video or shared screen"
-        ></video>
         <div
-          [class.hidden]="session.remoteVideoStream() || session.screenSharing()"
-          class="flex min-h-64 items-center justify-center text-zinc-500"
+          #videoSurface
+          class="relative flex min-h-[40vh] w-full items-center justify-center sm:min-h-[55vh]"
         >
-          Your preview
+          <video
+            #remoteVideo
+            autoplay
+            playsinline
+            [class]="
+              !session.remoteVideoStream()
+                ? 'hidden'
+                : session.collaboration.peerVideoSource() === 'screen' ||
+                    session.collaboration.localVideoSource() !== 'screen'
+                  ? 'max-h-[70vh] w-full object-contain'
+                  : 'absolute bottom-3 right-3 max-h-40 w-[min(28%,18rem)] rounded-2xl border border-white/70 bg-zinc-200 object-contain shadow-lg'
+            "
+            aria-label="Peer video or shared screen"
+          ></video>
+          <div
+            [class.hidden]="session.remoteVideoStream() || session.screenSharing()"
+            class="flex min-h-64 items-center justify-center text-zinc-500"
+          >
+            Your preview
+          </div>
+          <video
+            #localVideo
+            autoplay
+            muted
+            playsinline
+            [class]="
+              !session.localVideoStream()
+                ? 'hidden'
+                : session.collaboration.localVideoSource() === 'screen' &&
+                    session.collaboration.peerVideoSource() !== 'screen'
+                  ? 'max-h-[70vh] w-full object-contain'
+                  : 'absolute bottom-3 right-3 max-h-40 w-[min(28%,18rem)] rounded-2xl border border-white/70 bg-zinc-200 object-contain shadow-lg'
+            "
+            aria-label="Your camera or shared screen preview"
+          ></video>
+          @if (session.collaboration.surfaceActive()) {
+            <svg
+              class="absolute inset-0 h-full w-full touch-none"
+              [attr.viewBox]="overlayViewBox()"
+              preserveAspectRatio="none"
+              role="img"
+              aria-label="Shared screen collaboration surface"
+              (pointerdown)="onSurfacePointerDown($event)"
+              (pointermove)="onSurfacePointerMove($event)"
+              (pointerup)="onSurfacePointerUp($event)"
+              (pointercancel)="onSurfacePointerUp($event)"
+              (pointerleave)="onSurfacePointerLeave()"
+            >
+              <g [attr.transform]="overlayTransform()">
+                @for (stroke of session.collaboration.strokes(); track stroke.id) {
+                  <path
+                    [attr.d]="strokePath(stroke.points)"
+                    fill="none"
+                    stroke="#2563eb"
+                    stroke-width="0.004"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    vector-effect="non-scaling-stroke"
+                    class="pointer-events-none"
+                  />
+                }
+                @if (session.collaboration.remotePointer(); as pointer) {
+                  <circle
+                    [attr.cx]="pointer.x"
+                    [attr.cy]="pointer.y"
+                    [attr.r]="pointer.mode === 'laser' ? 0.012 : 0.009"
+                    [attr.fill]="pointer.mode === 'laser' ? '#ef4444' : '#2563eb'"
+                    class="pointer-events-none"
+                    [class.animate-pulse]="pointer.mode === 'laser'"
+                  />
+                }
+              </g>
+            </svg>
+          }
         </div>
-        <video
-          #localVideo
-          autoplay
-          muted
-          playsinline
-          [class.hidden]="!session.localVideoStream()"
-          [class]="
-            session.screenSharing() && !session.remoteVideoStream()
-              ? 'max-h-[70vh] w-full object-contain'
-              : 'absolute bottom-5 right-5 max-h-40 w-[min(28%,18rem)] rounded-2xl border border-white/70 bg-zinc-200 object-contain shadow-lg'
-          "
-          aria-label="Your camera or shared screen preview"
-        ></video>
       </section>
       @if (!isValidRoom()) {
         <h1 class="text-3xl font-semibold tracking-tight sm:text-5xl">Invalid room link</h1>
@@ -210,6 +264,34 @@ import { CallSessionService } from '../services/call-session.service';
             Leave
           </button>
         </div>
+        @if (session.collaboration.surfaceActive()) {
+          <div class="flex flex-wrap justify-center gap-2" aria-label="Screen collaboration tools">
+            @for (tool of collaborationTools; track tool.id) {
+              <button
+                type="button"
+                class="rounded-full border border-zinc-300 px-4 py-2 text-sm disabled:opacity-50"
+                [attr.aria-pressed]="session.collaboration.tool() === tool.id"
+                [disabled]="
+                  tool.disabled ||
+                  ((tool.id === 'pointer' || tool.id === 'laser') &&
+                    !session.collaboration.pointerChannelOpen()) ||
+                  (tool.id === 'draw' && !session.collaboration.collaborationChannelOpen())
+                "
+                (click)="session.collaboration.setTool(tool.id)"
+              >
+                {{ tool.label }}
+              </button>
+            }
+            <button
+              type="button"
+              class="rounded-full border border-zinc-300 px-4 py-2 text-sm disabled:opacity-50"
+              [disabled]="!session.collaboration.collaborationChannelOpen()"
+              (click)="session.collaboration.clearAnnotations()"
+            >
+              Clear
+            </button>
+          </div>
+        }
         @if (session.fileTransfers.transfers().length) {
           <section class="w-full max-w-2xl space-y-3" aria-label="File transfers">
             @for (transfer of session.fileTransfers.transfers(); track transfer.id) {
@@ -329,6 +411,20 @@ export default class RoomPage implements OnDestroy {
   readonly roomId = input.required<string>();
   protected readonly session = inject(CallSessionService);
   protected readonly copied = signal(false);
+  protected readonly overlay = signal({
+    left: 0,
+    top: 0,
+    width: 0,
+    height: 0,
+    hostWidth: 0,
+    hostHeight: 0,
+  });
+  protected readonly collaborationTools = [
+    { id: 'off', label: 'Off', disabled: false },
+    { id: 'pointer', label: 'Pointer', disabled: false },
+    { id: 'laser', label: 'Laser', disabled: false },
+    { id: 'draw', label: 'Draw', disabled: false },
+  ] as const;
   protected readonly showConnectionPath = import.meta.env.DEV;
   protected readonly isValidRoom = computed(() => roomIdSchema.safeParse(this.roomId()).success);
   protected readonly isActive = computed(() =>
@@ -350,11 +446,23 @@ export default class RoomPage implements OnDestroy {
   private readonly remoteAudio = viewChild<ElementRef<HTMLAudioElement>>('remoteAudio');
   private readonly remoteVideo = viewChild<ElementRef<HTMLVideoElement>>('remoteVideo');
   private readonly localVideo = viewChild<ElementRef<HTMLVideoElement>>('localVideo');
+  private readonly videoSurface = viewChild<ElementRef<HTMLElement>>('videoSurface');
   private readonly filePickerRef = viewChild<ElementRef<HTMLInputElement>>('filePicker');
+  private resizeObserver: ResizeObserver | null = null;
+  private observedSurface: HTMLElement | null = null;
+  private observedVideos = new Set<HTMLVideoElement>();
+  private pendingPointer: {
+    readonly mode: 'pointer' | 'laser';
+    readonly point: NormalizedPoint;
+  } | null = null;
+  private pointerFrame: number | null = null;
+  private drawing = false;
   protected readonly Math = Math;
 
   constructor() {
     effect(() => {
+      this.session.collaboration.surfaceRevision();
+      this.cancelPendingPointer();
       const audio = this.remoteAudio()?.nativeElement;
       if (audio) {
         audio.srcObject = this.session.remoteAudioStream();
@@ -370,7 +478,162 @@ export default class RoomPage implements OnDestroy {
         local.srcObject = this.session.localVideoStream();
         if (local.srcObject) void local.play().catch(() => undefined);
       }
+      const surface = this.videoSurface()?.nativeElement;
+      if (surface !== this.observedSurface) {
+        this.resizeObserver?.disconnect();
+        this.observedSurface = surface ?? null;
+        if (surface && typeof ResizeObserver !== 'undefined') {
+          this.resizeObserver ??= new ResizeObserver(() => {
+            this.measureOverlay();
+          });
+          this.resizeObserver.observe(surface);
+        }
+      }
+      const videos = [this.remoteVideo()?.nativeElement, this.localVideo()?.nativeElement].filter(
+        (video): video is HTMLVideoElement => video !== undefined,
+      );
+      for (const video of this.observedVideos) {
+        if (!videos.includes(video)) {
+          this.resizeObserver?.unobserve(video);
+          video.removeEventListener('resize', this.measureOverlay);
+          this.observedVideos.delete(video);
+        }
+      }
+      for (const video of videos) {
+        if (this.observedVideos.has(video)) continue;
+        this.observedVideos.add(video);
+        this.resizeObserver?.observe(video);
+        video.addEventListener('resize', this.measureOverlay);
+      }
+      if (typeof requestAnimationFrame !== 'undefined') requestAnimationFrame(this.measureOverlay);
     });
+  }
+
+  protected overlayViewBox(): string {
+    const { hostWidth, hostHeight } = this.overlay();
+    return `0 0 ${String(Math.max(1, hostWidth))} ${String(Math.max(1, hostHeight))}`;
+  }
+
+  protected overlayTransform(): string {
+    const { left, top, width, height } = this.overlay();
+    return `translate(${String(left)} ${String(top)}) scale(${String(width)} ${String(height)})`;
+  }
+
+  protected strokePath(points: readonly NormalizedPoint[]): string {
+    return points
+      .map((point, index) => `${index ? 'L' : 'M'} ${String(point.x)} ${String(point.y)}`)
+      .join(' ');
+  }
+
+  protected onSurfacePointerDown(event: PointerEvent): void {
+    if (this.session.collaboration.tool() !== 'draw') return;
+    const point = this.normalizedPoint(event);
+    if (!point) return;
+    event.preventDefault();
+    (event.currentTarget as SVGSVGElement).setPointerCapture(event.pointerId);
+    this.drawing = true;
+    this.session.collaboration.beginStroke(point);
+  }
+
+  protected onSurfacePointerMove(event: PointerEvent): void {
+    const point = this.normalizedPoint(event);
+    if (!point) {
+      if (!this.drawing) this.sendPointerHideSoon();
+      return;
+    }
+    if (this.drawing) {
+      this.session.collaboration.addStrokePoint(point);
+      return;
+    }
+    const tool = this.session.collaboration.tool();
+    if (tool === 'pointer' || tool === 'laser') {
+      this.pendingPointer = { mode: tool, point };
+      this.pointerFrame ??= requestAnimationFrame(() => {
+        this.pointerFrame = null;
+        const pending = this.pendingPointer;
+        this.pendingPointer = null;
+        if (pending) this.session.collaboration.sendPointer(pending.mode, pending.point);
+      });
+    }
+  }
+
+  protected onSurfacePointerUp(event: PointerEvent): void {
+    if (!this.drawing) return;
+    this.drawing = false;
+    if ((event.currentTarget as SVGSVGElement).hasPointerCapture(event.pointerId))
+      (event.currentTarget as SVGSVGElement).releasePointerCapture(event.pointerId);
+    this.session.collaboration.finishStroke();
+  }
+
+  protected onSurfacePointerLeave(): void {
+    if (this.drawing) {
+      this.drawing = false;
+      this.session.collaboration.finishStroke();
+    }
+    this.sendPointerHideSoon();
+  }
+
+  private readonly measureOverlay = (): void => {
+    const host = this.videoSurface()?.nativeElement;
+    const video = this.activeVideoElement();
+    if (!host || !video) {
+      this.overlay.set({ left: 0, top: 0, width: 0, height: 0, hostWidth: 0, hostHeight: 0 });
+      return;
+    }
+    const hostRect = host.getBoundingClientRect();
+    const videoRect = video.getBoundingClientRect();
+    const content = containedVideoRect(
+      videoRect.width,
+      videoRect.height,
+      video.videoWidth,
+      video.videoHeight,
+    );
+    if (!content) return;
+    this.overlay.set({
+      left: videoRect.left - hostRect.left + content.left,
+      top: videoRect.top - hostRect.top + content.top,
+      width: content.width,
+      height: content.height,
+      hostWidth: hostRect.width,
+      hostHeight: hostRect.height,
+    });
+  };
+
+  private activeVideoElement(): HTMLVideoElement | null {
+    if (this.session.collaboration.peerVideoSource() === 'screen')
+      return this.remoteVideo()?.nativeElement ?? null;
+    if (this.session.collaboration.localVideoSource() === 'screen')
+      return this.localVideo()?.nativeElement ?? null;
+    return null;
+  }
+
+  private normalizedPoint(event: PointerEvent): NormalizedPoint | null {
+    const video = this.activeVideoElement();
+    if (!video) return null;
+    const rect = video.getBoundingClientRect();
+    return clientToNormalized(
+      event.clientX,
+      event.clientY,
+      rect,
+      video.videoWidth,
+      video.videoHeight,
+    );
+  }
+
+  private sendPointerHideSoon(): void {
+    this.cancelPendingPointer();
+    if (
+      this.session.collaboration.tool() === 'pointer' ||
+      this.session.collaboration.tool() === 'laser'
+    )
+      this.session.collaboration.sendPointerHide();
+  }
+
+  private cancelPendingPointer(): void {
+    if (this.pointerFrame !== null && typeof cancelAnimationFrame !== 'undefined')
+      cancelAnimationFrame(this.pointerFrame);
+    this.pointerFrame = null;
+    this.pendingPointer = null;
   }
 
   protected join(): void {
@@ -426,6 +689,11 @@ export default class RoomPage implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.resizeObserver?.disconnect();
+    for (const video of this.observedVideos)
+      video.removeEventListener('resize', this.measureOverlay);
+    if (this.pointerFrame !== null && typeof cancelAnimationFrame !== 'undefined')
+      cancelAnimationFrame(this.pointerFrame);
     for (const ref of [this.remoteAudio(), this.remoteVideo(), this.localVideo()]) {
       if (ref) ref.nativeElement.srcObject = null;
     }

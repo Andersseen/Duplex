@@ -4,7 +4,10 @@ import { PROTOCOL_VERSION, roomIdSchema, serverSignalingMessageSchema } from '@d
 import type { RtcConfigMessage, ServerSignalingMessage, SignalingMessage } from '@duplex/protocol';
 import { createDuplexPeer, toRtcIceServers } from '@duplex/webrtc';
 import type { DuplexPeer, PeerSignalingMessage, SignalingTransport } from '@duplex/webrtc';
+import { DATA_CHANNEL_LABELS } from '@duplex/webrtc';
+import type { DuplexDataChannel } from '@duplex/webrtc';
 import { FileTransferService } from './file-transfer.service';
+import { CollaborationService } from './collaboration.service';
 
 export type CallState =
   | 'ready'
@@ -16,6 +19,8 @@ export type CallState =
   | 'reconnecting'
   | 'failed'
   | 'left';
+
+const MAX_PENDING_PEER_MESSAGES = 64;
 
 @Injectable()
 export class CallSessionService implements OnDestroy {
@@ -33,13 +38,15 @@ export class CallSessionService implements OnDestroy {
   readonly connectionPath = signal<'direct' | 'relay' | 'unknown'>('unknown');
   readonly fileChannelOpen = signal(false);
   readonly fileTransfers = new FileTransferService();
+  readonly collaboration = new CollaborationService();
 
   private socket: WebSocket | null = null;
   private peer: DuplexPeer | null = null;
   private peerUnsubscribe: (() => void) | null = null;
-  private dataChannelUnsubscribe: (() => void) | null = null;
+  private dataChannelUnsubscribers = new Map<DuplexDataChannel, () => void>();
   private callTransport: SignalingTransport | null = null;
   private transportListener: ((message: PeerSignalingMessage) => void) | null = null;
+  private pendingPeerMessages: PeerSignalingMessage[] = [];
   private microphoneStream: MediaStream | null = null;
   private cameraTrack: MediaStreamTrack | null = null;
   private displayStream: MediaStream | null = null;
@@ -135,6 +142,7 @@ export class CallSessionService implements OnDestroy {
     this.cameraError.set('');
     if (this.cameraEnabled()) {
       this.cameraEnabled.set(false);
+      if (!this.screenSharing()) this.collaboration.setLocalVideoSource('none');
       try {
         if (!this.screenSharing()) await this.replaceOutgoingVideo(null);
       } catch {
@@ -161,6 +169,7 @@ export class CallSessionService implements OnDestroy {
     }
     this.cameraTrack = track;
     this.cameraEnabled.set(true);
+    if (!this.screenSharing()) this.collaboration.setLocalVideoSource('camera');
     this.updateLocalVideo();
     try {
       if (!this.screenSharing()) await this.replaceOutgoingVideo(track);
@@ -196,6 +205,7 @@ export class CallSessionService implements OnDestroy {
       void this.stopScreenSharing();
     };
     this.screenSharing.set(true);
+    this.collaboration.setLocalVideoSource('screen');
     this.updateLocalVideo();
     try {
       await this.replaceOutgoingVideo(track);
@@ -213,6 +223,7 @@ export class CallSessionService implements OnDestroy {
     this.displayTrack = null;
     this.displayStream = null;
     this.screenSharing.set(false);
+    this.collaboration.setLocalVideoSource(this.cameraEnabled() ? 'camera' : 'none');
     if (track) track.onended = null;
     this.stopTrack(track);
     this.updateLocalVideo();
@@ -267,6 +278,7 @@ export class CallSessionService implements OnDestroy {
       this.peerPresent = true;
       if (this.lastJoined) this.startPeer(this.lastJoined.polite);
     } else if (message.type === 'peer-left') {
+      this.peerPresent = false;
       this.closePeer();
       if (this.microphoneStream) this.state.set('waiting-for-peer');
     } else if (message.type === 'room-full') {
@@ -293,10 +305,16 @@ export class CallSessionService implements OnDestroy {
       },
       subscribe: (listener) => {
         listeners.add(listener);
+        for (const message of this.pendingPeerMessages.splice(0)) listener(message);
         return () => listeners.delete(listener);
       },
     };
     this.transportListener = (message) => {
+      if (!listeners.size) {
+        if (this.peerPresent && this.pendingPeerMessages.length < MAX_PENDING_PEER_MESSAGES)
+          this.pendingPeerMessages.push(message);
+        return;
+      }
       for (const listener of listeners) listener(message);
     };
   }
@@ -335,14 +353,22 @@ export class CallSessionService implements OnDestroy {
         this.remoteAudioStream.set(event.media.audio);
         this.remoteVideoStream.set(event.media.video);
       } else if (event.type === 'data-channel') {
-        this.fileTransfers.attachChannel(event.channel);
-        this.dataChannelUnsubscribe?.();
-        this.dataChannelUnsubscribe = event.channel.subscribe((channelEvent) => {
-          if (channelEvent.type === 'open') this.fileChannelOpen.set(true);
-          else if (channelEvent.type === 'close') this.fileChannelOpen.set(false);
-        });
-        this.fileChannelOpen.set(event.channel.state === 'open');
-      } else {
+        if (event.channel.label === DATA_CHANNEL_LABELS.fileTransfer) {
+          this.fileTransfers.attachChannel(event.channel);
+          this.dataChannelUnsubscribers.get(event.channel)?.();
+          const unsubscribe = event.channel.subscribe((channelEvent) => {
+            if (channelEvent.type === 'open') this.fileChannelOpen.set(true);
+            else if (channelEvent.type === 'close') {
+              this.fileChannelOpen.set(false);
+              this.dataChannelUnsubscribers.delete(event.channel);
+            }
+          });
+          this.dataChannelUnsubscribers.set(event.channel, unsubscribe);
+          this.fileChannelOpen.set(event.channel.state === 'open');
+        } else {
+          this.collaboration.attachChannel(event.channel);
+        }
+      } else if (event.label === DATA_CHANNEL_LABELS.fileTransfer) {
         this.fileChannelOpen.set(true);
       }
     });
@@ -390,10 +416,12 @@ export class CallSessionService implements OnDestroy {
   }
 
   private closePeer(): void {
-    this.dataChannelUnsubscribe?.();
-    this.dataChannelUnsubscribe = null;
+    this.pendingPeerMessages = [];
+    for (const unsubscribe of this.dataChannelUnsubscribers.values()) unsubscribe();
+    this.dataChannelUnsubscribers.clear();
     this.fileChannelOpen.set(false);
     this.fileTransfers.peerChanged();
+    this.collaboration.peerChanged();
     this.peerUnsubscribe?.();
     this.peerUnsubscribe = null;
     this.peer?.close();
@@ -438,6 +466,8 @@ export class CallSessionService implements OnDestroy {
       this.localVideoStream.set(null);
       this.cameraEnabled.set(false);
       this.screenSharing.set(false);
+      this.collaboration.setLocalVideoSource('none');
+      this.collaboration.destroy();
       this.muted.set(false);
     }
   }
