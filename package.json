@@ -27,6 +27,7 @@
     "deploy": "pnpm deploy:worker && pnpm deploy:web"
   },
   "devDependencies": {
+    "@agentyx/cli": "^0.9.0",
     "@playwright/test": "^1.64.0",
     "prettier": "^3.9.9",
     "turbo": "^2.11.7"
