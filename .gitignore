@@ -11,6 +11,8 @@ dist
 !.env.example
 !.dev.vars.example
 coverage
+playwright-report
+test-results
 *.tsbuildinfo
 target
 gen

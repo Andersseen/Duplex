@@ -5,6 +5,7 @@
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
+  "vars": { "ENVIRONMENT": "production" },
   "durable_objects": {
     "bindings": [{ "name": "CALL_ROOM", "class_name": "CallRoom" }],
   },

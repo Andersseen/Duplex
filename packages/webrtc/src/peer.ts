@@ -1,6 +1,10 @@
 import { deriveConnectionState } from './connection-state';
+import { createDuplexDataChannel } from './data-channel';
+import { DATA_CHANNEL_LABELS } from './types';
 import type { DuplexConnectionState } from './connection-state';
 import type {
+  ConnectionPath,
+  DuplexDataChannel,
   DuplexPeer,
   PeerEvent,
   PeerEventListener,
@@ -12,6 +16,7 @@ export interface PeerOptions {
   readonly polite: boolean;
   readonly localStream: MediaStream;
   readonly iceServers?: RTCIceServer[];
+  readonly iceTransportPolicy?: RTCIceTransportPolicy;
   readonly createPeerConnection?: (configuration: RTCConfiguration) => RTCPeerConnection;
   readonly createIceCandidate?: (candidate: RTCIceCandidateInit) => RTCIceCandidate;
 }
@@ -23,7 +28,8 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
   const createIceCandidate =
     options.createIceCandidate ?? ((candidate) => new RTCIceCandidate(candidate));
   const connection = createConnection({
-    iceServers: options.iceServers ?? [{ urls: 'stun:stun.l.google.com:19302' }],
+    iceServers: options.iceServers ?? [{ urls: 'stun:stun.cloudflare.com:3478' }],
+    ...(options.iceTransportPolicy ? { iceTransportPolicy: options.iceTransportPolicy } : {}),
   });
   // Keep one stable outgoing video sender so camera and display tracks can be swapped without
   // rebuilding the peer connection or negotiating a second video track.
@@ -34,9 +40,35 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
   const pendingCandidates: (RTCIceCandidateInit | null)[] = [];
   let hasConnected = false;
   let closed = false;
+  let recoveryAttempts = 0;
+  let recoveryExhausted = false;
+  let recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  let recoveryCheckTimer: ReturnType<typeof setTimeout> | null = null;
   let connectionState: DuplexConnectionState = 'idle';
   const listeners = new Set<PeerEventListener>();
   const remoteTracks = new Map<string, MediaStreamTrack>();
+  const isConnected = (): boolean =>
+    connection.connectionState === 'connected' &&
+    (connection.iceConnectionState === 'connected' ||
+      connection.iceConnectionState === 'completed');
+  let fileChannel: DuplexDataChannel | null = null;
+  let fileChannelCreated = false;
+  const attachFileChannel = (raw: RTCDataChannel): void => {
+    if (raw.label !== DATA_CHANNEL_LABELS.fileTransfer || fileChannelCreated) {
+      raw.close();
+      return;
+    }
+    fileChannelCreated = true;
+    fileChannel = createDuplexDataChannel(raw);
+    emit({ type: 'data-channel', channel: fileChannel });
+    fileChannel.subscribe((event) => {
+      if (event.type === 'open') {
+        const label = fileChannel?.label;
+        if (label) emit({ type: 'data-channel-open', label });
+      }
+      if (event.type === 'close') fileChannel = null;
+    });
+  };
   const emitRemoteMedia = (): void => {
     const tracks = [...remoteTracks.values()];
     const audioTracks = tracks.filter((track) => track.kind === 'audio');
@@ -55,16 +87,116 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
   const emit = (event: PeerEvent): void => {
     for (const listener of listeners) listener(event);
   };
+  if (!options.polite) {
+    attachFileChannel(
+      connection.createDataChannel(DATA_CHANNEL_LABELS.fileTransfer, { ordered: true }),
+    );
+  }
+  connection.ondatachannel = (event) => {
+    attachFileChannel(event.channel);
+  };
   const emitState = (): void => {
-    if (connection.connectionState === 'connected') hasConnected = true;
-    connectionState = deriveConnectionState({
-      connectionState: connection.connectionState,
-      iceConnectionState: connection.iceConnectionState,
-      hasConnected,
-    });
+    if (isConnected()) {
+      hasConnected = true;
+      recoveryAttempts = 0;
+      recoveryExhausted = false;
+      if (recoveryTimer) clearTimeout(recoveryTimer);
+      if (recoveryCheckTimer) clearTimeout(recoveryCheckTimer);
+      recoveryTimer = null;
+      recoveryCheckTimer = null;
+      void inspectConnectionPath();
+    } else if (recoveryExhausted) {
+      connectionState = 'failed';
+      emit({ type: 'connection-state', state: 'failed' });
+      return;
+    } else if (
+      hasConnected &&
+      (connection.connectionState === 'disconnected' ||
+        connection.connectionState === 'failed' ||
+        connection.iceConnectionState === 'disconnected' ||
+        connection.iceConnectionState === 'failed')
+    ) {
+      scheduleIceRecovery();
+    } else if (
+      connection.connectionState === 'failed' ||
+      connection.iceConnectionState === 'failed'
+    ) {
+      scheduleIceRecovery();
+    }
+    const recoveryPending =
+      recoveryTimer !== null || recoveryCheckTimer !== null || recoveryAttempts > 0;
+    connectionState = recoveryPending
+      ? hasConnected
+        ? 'reconnecting'
+        : 'connecting'
+      : deriveConnectionState({
+          connectionState: connection.connectionState,
+          iceConnectionState: connection.iceConnectionState,
+          hasConnected,
+        });
     emit({ type: 'connection-state', state: connectionState });
   };
+  const emitConnectionPath = (path: ConnectionPath): void => {
+    emit({ type: 'connection-path', path });
+  };
+  const inspectConnectionPath = async (): Promise<void> => {
+    try {
+      const stats = await connection.getStats();
+      let selectedLocalCandidateId: string | undefined;
+      for (const id of stats.keys()) {
+        const report: unknown = stats.get(id);
+        if (typeof report !== 'object' || report === null) continue;
+        const fields = report as Record<string, unknown>;
+        if (
+          fields['type'] === 'candidate-pair' &&
+          fields['state'] === 'succeeded' &&
+          (fields['selected'] === true || fields['nominated'] === true) &&
+          typeof fields['localCandidateId'] === 'string'
+        ) {
+          selectedLocalCandidateId = fields['localCandidateId'];
+          break;
+        }
+      }
+      const localCandidate: unknown = selectedLocalCandidateId
+        ? stats.get(selectedLocalCandidateId)
+        : undefined;
+      let candidateType: string | undefined;
+      if (typeof localCandidate === 'object' && localCandidate !== null) {
+        const fields = localCandidate as Record<string, unknown>;
+        if (fields['type'] === 'local-candidate' && typeof fields['candidateType'] === 'string')
+          candidateType = fields['candidateType'];
+      }
+      emitConnectionPath(
+        candidateType === 'relay' ? 'relay' : candidateType ? 'direct' : 'unknown',
+      );
+    } catch {
+      emitConnectionPath('unknown');
+    }
+  };
+  const scheduleIceRecovery = (): void => {
+    if (recoveryTimer || recoveryCheckTimer || recoveryAttempts >= 2 || closed) {
+      if (recoveryAttempts >= 2 && !recoveryCheckTimer) emitFailure();
+      return;
+    }
+    recoveryTimer = setTimeout(
+      () => {
+        recoveryTimer = null;
+        if (isConnected() || closed) return;
+        recoveryAttempts += 1;
+        connection.restartIce();
+        recoveryCheckTimer = setTimeout(() => {
+          recoveryCheckTimer = null;
+          if (isConnected()) return;
+          if (recoveryAttempts < 2) scheduleIceRecovery();
+          else emitFailure();
+        }, 8000);
+      },
+      recoveryAttempts === 0 ? 2500 : 0,
+    );
+  };
   const emitFailure = (): void => {
+    if (recoveryExhausted) return;
+    recoveryExhausted = true;
     connectionState = 'failed';
     emit({ type: 'connection-state', state: 'failed' });
   };
@@ -189,11 +321,22 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
     get connectionState() {
       return connectionState;
     },
+    updateIceServers(iceServers): void {
+      connection.setConfiguration({ ...connection.getConfiguration(), iceServers });
+    },
+    restartIce(): void {
+      connection.restartIce();
+    },
     setVideoTrack(track): Promise<void> {
       return videoSender.replaceTrack(track);
     },
     subscribe(listener: PeerEventListener): () => void {
       listeners.add(listener);
+      if (fileChannel) {
+        listener({ type: 'data-channel', channel: fileChannel });
+        if (fileChannel.state === 'open')
+          listener({ type: 'data-channel-open', label: fileChannel.label });
+      }
       return () => listeners.delete(listener);
     },
     close(): void {
@@ -203,8 +346,15 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
       connection.onnegotiationneeded = null;
       connection.onicecandidate = null;
       connection.ontrack = null;
+      connection.ondatachannel = null;
       connection.onconnectionstatechange = null;
       connection.oniceconnectionstatechange = null;
+      if (recoveryTimer) clearTimeout(recoveryTimer);
+      if (recoveryCheckTimer) clearTimeout(recoveryCheckTimer);
+      recoveryTimer = null;
+      recoveryCheckTimer = null;
+      fileChannel?.close();
+      fileChannel = null;
       connection.close();
       for (const track of remoteTracks.values()) {
         track.onmute = null;

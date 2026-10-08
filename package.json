@@ -19,9 +19,15 @@
     "format:check": "prettier --check .",
     "rust:check": "cargo check --manifest-path apps/helper/src-tauri/Cargo.toml --locked",
     "rust:fmt:check": "cargo fmt --manifest-path apps/helper/src-tauri/Cargo.toml --check",
-    "rust:clippy": "cargo clippy --manifest-path apps/helper/src-tauri/Cargo.toml --locked -- -D warnings"
+    "rust:clippy": "cargo clippy --manifest-path apps/helper/src-tauri/Cargo.toml --locked -- -D warnings",
+    "e2e": "playwright test",
+    "e2e:turn": "node scripts/e2e-turn.mjs",
+    "deploy:worker": "pnpm --filter @duplex/worker deploy",
+    "deploy:web": "pnpm --filter @duplex/web deploy",
+    "deploy": "pnpm deploy:worker && pnpm deploy:web"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "prettier": "^3.9.9",
     "turbo": "^2.11.7"
   }

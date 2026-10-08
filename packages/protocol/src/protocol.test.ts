@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   PROTOCOL_VERSION,
+  FILE_TRANSFER_PROTOCOL_VERSION,
+  MAX_FILE_TRANSFER_BYTES,
   controlMessageSchema,
   createRoomId,
+  fileTransferMessageSchema,
   healthResponseSchema,
   parseDuplexMessage,
   roomIdSchema,
@@ -11,6 +14,40 @@ import {
 } from './index';
 
 const requestId = '3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f';
+
+describe('file-transfer messages', () => {
+  it('validates versioned bounded file offers and all transfer controls', () => {
+    const transferId = crypto.randomUUID();
+    expect(
+      fileTransferMessageSchema.safeParse({
+        type: 'file-offer',
+        transferId,
+        protocolVersion: FILE_TRANSFER_PROTOCOL_VERSION,
+        name: 'notes.pdf',
+        size: MAX_FILE_TRANSFER_BYTES,
+        mimeType: 'application/pdf',
+      }).success,
+    ).toBe(true);
+    expect(
+      fileTransferMessageSchema.safeParse({
+        type: 'file-offer',
+        transferId,
+        protocolVersion: FILE_TRANSFER_PROTOCOL_VERSION,
+        name: '../notes.pdf',
+        size: MAX_FILE_TRANSFER_BYTES + 1,
+        mimeType: 'application/pdf',
+      }).success,
+    ).toBe(false);
+    for (const type of ['file-accept', 'file-reject', 'file-cancel', 'file-complete'])
+      expect(
+        fileTransferMessageSchema.safeParse({
+          type,
+          transferId,
+          protocolVersion: FILE_TRANSFER_PROTOCOL_VERSION,
+        }).success,
+      ).toBe(true);
+  });
+});
 
 describe('room ids', () => {
   it('generates valid, unique, URL-safe ids', () => {

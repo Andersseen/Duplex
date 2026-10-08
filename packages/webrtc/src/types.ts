@@ -1,8 +1,11 @@
 import type { DuplexConnectionState } from './connection-state';
 import type { AnswerMessage, IceCandidateMessage, OfferMessage } from '@duplex/protocol';
+import type { RtcConfigMessage } from '@duplex/protocol';
 
 /** Labels of the RTC data channels Duplex will open. Fixed so both peers agree. */
 export const DATA_CHANNEL_LABELS = {
+  /** Reliable, ordered peer-to-peer file transfer. */
+  fileTransfer: 'duplex-file-transfer',
   /** Control negotiation relayed peer to peer once remote control exists. */
   control: 'duplex-control',
 } as const;
@@ -15,10 +18,32 @@ export interface RemoteMedia {
   readonly video: MediaStream | null;
 }
 
+export type ConnectionPath = 'direct' | 'relay' | 'unknown';
+
 export type PeerEvent =
   | { readonly type: 'connection-state'; readonly state: DuplexConnectionState }
   | { readonly type: 'remote-media'; readonly media: RemoteMedia }
-  | { readonly type: 'data-channel-open'; readonly label: DataChannelLabel };
+  | { readonly type: 'connection-path'; readonly path: ConnectionPath }
+  | { readonly type: 'data-channel-open'; readonly label: DataChannelLabel }
+  | { readonly type: 'data-channel'; readonly channel: DuplexDataChannel };
+
+export type DuplexDataChannelEvent =
+  | { readonly type: 'open' }
+  | { readonly type: 'close' }
+  | { readonly type: 'message'; readonly data: string | ArrayBuffer };
+
+/** Framework-independent wrapper. Raw RTCDataChannel instances stay inside this package. */
+export interface DuplexDataChannel {
+  readonly label: DataChannelLabel;
+  readonly state: 'connecting' | 'open' | 'closing' | 'closed';
+  readonly bufferedAmount: number;
+  readonly bufferedAmountLowThreshold: number;
+  sendText(data: string): void;
+  sendBinary(data: ArrayBuffer): void;
+  waitForBufferedAmountLow(): Promise<void>;
+  subscribe(listener: (event: DuplexDataChannelEvent) => void): () => void;
+  close(): void;
+}
 
 export type PeerEventListener = (event: PeerEvent) => void;
 
@@ -34,7 +59,19 @@ export interface SignalingTransport {
  */
 export interface DuplexPeer {
   readonly connectionState: DuplexConnectionState;
+  updateIceServers(iceServers: RTCIceServer[]): void;
+  restartIce(): void;
   setVideoTrack(track: MediaStreamTrack | null): Promise<void>;
   subscribe(listener: PeerEventListener): () => void;
   close(): void;
+}
+
+export function toRtcIceServers(
+  iceServers: RtcConfigMessage['payload']['iceServers'],
+): RTCIceServer[] {
+  return iceServers.map((server) => ({
+    urls: server.urls,
+    ...(server.username ? { username: server.username } : {}),
+    ...(server.credential ? { credential: server.credential } : {}),
+  }));
 }

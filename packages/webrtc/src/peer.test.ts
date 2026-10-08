@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PeerSignalingMessage, SignalingTransport } from './types';
+import type { DuplexDataChannel } from './types';
 import { createDuplexPeer } from './peer';
 
 class FakeTransport implements SignalingTransport {
@@ -17,6 +18,33 @@ class FakeTransport implements SignalingTransport {
   }
 }
 
+class FakeDataChannel {
+  readyState: RTCDataChannelState = 'connecting';
+  bufferedAmount = 0;
+  bufferedAmountLowThreshold = 0;
+  binaryType: BinaryType = 'blob';
+  onopen: ((this: RTCDataChannel, ev: Event) => unknown) | null = null;
+  onclose: ((this: RTCDataChannel, ev: Event) => unknown) | null = null;
+  onmessage: ((this: RTCDataChannel, ev: MessageEvent) => unknown) | null = null;
+  onbufferedamountlow: ((this: RTCDataChannel, ev: Event) => unknown) | null = null;
+  readonly sent: (string | ArrayBuffer)[] = [];
+  constructor(readonly label: string) {}
+  send(data: string | ArrayBuffer): void {
+    this.sent.push(data);
+  }
+  open(): void {
+    this.readyState = 'open';
+    this.onopen?.call(this as unknown as RTCDataChannel, new Event('open'));
+  }
+  message(data: string | ArrayBuffer): void {
+    this.onmessage?.call(this as unknown as RTCDataChannel, new MessageEvent('message', { data }));
+  }
+  close(): void {
+    this.readyState = 'closed';
+    this.onclose?.call(this as unknown as RTCDataChannel, new Event('close'));
+  }
+}
+
 class FakeConnection {
   connectionState: RTCPeerConnectionState = 'new';
   iceConnectionState: RTCIceConnectionState = 'new';
@@ -27,6 +55,7 @@ class FakeConnection {
   onicecandidate: ((this: RTCPeerConnection, event: RTCPeerConnectionIceEvent) => unknown) | null =
     null;
   ontrack: ((this: RTCPeerConnection, event: RTCTrackEvent) => unknown) | null = null;
+  ondatachannel: ((this: RTCPeerConnection, event: RTCDataChannelEvent) => unknown) | null = null;
   onconnectionstatechange: ((this: RTCPeerConnection, event: Event) => unknown) | null = null;
   oniceconnectionstatechange: ((this: RTCPeerConnection, event: Event) => unknown) | null = null;
   readonly candidates: (RTCIceCandidate | null)[] = [];
@@ -34,6 +63,10 @@ class FakeConnection {
   addTrackCalls = 0;
   addTransceiverCalls = 0;
   readonly replacedTracks: (MediaStreamTrack | null)[] = [];
+  readonly restarted = { count: 0 };
+  readonly dataChannels: FakeDataChannel[] = [];
+  configuration: RTCConfiguration = {};
+  candidateStats: RTCStats[] = [];
   readonly videoSender = {
     replaceTrack: (track: MediaStreamTrack | null) => {
       this.replacedTracks.push(track);
@@ -46,6 +79,12 @@ class FakeConnection {
   addTransceiver(): RTCRtpTransceiver {
     this.addTransceiverCalls += 1;
     return { sender: this.videoSender } as unknown as RTCRtpTransceiver;
+  }
+  createDataChannel(label: string, options?: RTCDataChannelInit): RTCDataChannel {
+    expect(options?.ordered).toBe(true);
+    const channel = new FakeDataChannel(label);
+    this.dataChannels.push(channel);
+    return channel as unknown as RTCDataChannel;
   }
   setLocalDescription(): Promise<void> {
     const type = this.signalingState === 'have-remote-offer' ? 'answer' : 'offer';
@@ -61,6 +100,20 @@ class FakeConnection {
   addIceCandidate(candidate: RTCIceCandidate | null): Promise<void> {
     this.candidates.push(candidate);
     return Promise.resolve();
+  }
+  getConfiguration(): RTCConfiguration {
+    return this.configuration;
+  }
+  setConfiguration(configuration: RTCConfiguration): void {
+    this.configuration = configuration;
+  }
+  restartIce(): void {
+    this.restarted.count += 1;
+  }
+  getStats(): Promise<RTCStatsReport> {
+    return Promise.resolve(
+      new Map(this.candidateStats.map((stat) => [stat.id, stat])) as unknown as RTCStatsReport,
+    );
   }
   close(): void {
     this.closed = true;
@@ -154,5 +207,239 @@ describe('createDuplexPeer', () => {
     expect(connection.closed).toBe(false);
     peer.close();
     expect(connection.closed).toBe(true);
+  });
+
+  it('creates exactly one reliable channel on the impolite side and accepts it on the polite side', () => {
+    const ownerConnection = new FakeConnection();
+    const owner = createDuplexPeer(new FakeTransport(), {
+      polite: false,
+      localStream: createLocalStream(),
+      createPeerConnection: () => ownerConnection.asPeerConnection(),
+    });
+    expect(ownerConnection.dataChannels).toHaveLength(1);
+    expect(ownerConnection.dataChannels[0]?.label).toBe('duplex-file-transfer');
+    const ownerEvents: string[] = [];
+    let ownerChannel: DuplexDataChannel | undefined;
+    const received: (string | ArrayBuffer)[] = [];
+    owner.subscribe((event) => {
+      if (event.type === 'data-channel') {
+        ownerEvents.push('channel');
+        ownerChannel = event.channel;
+        event.channel.subscribe((channelEvent) => {
+          if (channelEvent.type === 'message') received.push(channelEvent.data);
+        });
+      }
+      if (event.type === 'data-channel-open') ownerEvents.push('open');
+    });
+    const raw = ownerConnection.dataChannels[0];
+    if (!raw) throw new Error('Impolite peer did not create its file channel.');
+    raw.open();
+    expect(ownerEvents).toEqual(['channel', 'open']);
+    ownerChannel?.sendText('control');
+    const bytes = new Uint8Array([1, 2, 3]).buffer;
+    ownerChannel?.sendBinary(bytes);
+    expect(raw.sent).toEqual(['control', bytes]);
+    raw.message('reply');
+    raw.message(bytes);
+    expect(received).toEqual(['reply', bytes]);
+
+    const politeConnection = new FakeConnection();
+    const polite = createDuplexPeer(new FakeTransport(), {
+      polite: true,
+      localStream: createLocalStream(),
+      createPeerConnection: () => politeConnection.asPeerConnection(),
+    });
+    expect(politeConnection.dataChannels).toHaveLength(0);
+    let accepted = 0;
+    polite.subscribe((event) => {
+      if (event.type === 'data-channel') accepted += 1;
+    });
+    const incoming = new FakeDataChannel('duplex-file-transfer');
+    politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
+      channel: incoming as unknown as RTCDataChannel,
+    } as RTCDataChannelEvent);
+    expect(accepted).toBe(1);
+    expect(incoming.binaryType).toBe('arraybuffer');
+    politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
+      channel: new FakeDataChannel('duplex-file-transfer') as unknown as RTCDataChannel,
+    } as RTCDataChannelEvent);
+    expect(accepted).toBe(1);
+    expect(politeConnection.closed).toBe(false);
+    owner.close();
+    polite.close();
+    expect(raw.readyState).toBe('closed');
+    expect(incoming.readyState).toBe('closed');
+
+    const replacementConnection = new FakeConnection();
+    const replacement = createDuplexPeer(new FakeTransport(), {
+      polite: false,
+      localStream: createLocalStream(),
+      createPeerConnection: () => replacementConnection.asPeerConnection(),
+    });
+    expect(replacementConnection.dataChannels).toHaveLength(1);
+    expect(replacementConnection.dataChannels[0]).not.toBe(raw);
+    replacement.close();
+  });
+
+  it('uses supplied ICE servers and updates them without rebuilding the peer', () => {
+    const transport = new FakeTransport();
+    const connection = new FakeConnection();
+    const initialIceServers = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+    const peer = createDuplexPeer(transport, {
+      polite: true,
+      localStream: createLocalStream(),
+      iceServers: initialIceServers,
+      createPeerConnection: (configuration) => {
+        connection.configuration = configuration;
+        return connection.asPeerConnection();
+      },
+    });
+    expect(connection.configuration.iceServers).toEqual(initialIceServers);
+    const updated = [
+      { urls: 'turn:turn.cloudflare.com:3478?transport=udp', username: 'user', credential: 'pass' },
+    ];
+    peer.updateIceServers(updated);
+    expect(connection.configuration.iceServers).toEqual(updated);
+    expect(connection.closed).toBe(false);
+    peer.close();
+  });
+
+  it('restarts ICE and retains perfect negotiation for the restart offer', async () => {
+    const transport = new FakeTransport();
+    const connection = new FakeConnection();
+    const peer = createDuplexPeer(transport, {
+      polite: true,
+      localStream: createLocalStream(),
+      createPeerConnection: () => connection.asPeerConnection(),
+    });
+    peer.restartIce();
+    expect(connection.restarted.count).toBe(1);
+    await connection.onnegotiationneeded?.call(
+      connection.asPeerConnection(),
+      new Event('negotiationneeded'),
+    );
+    expect(transport.sent.at(-1)?.type).toBe('offer');
+    peer.close();
+  });
+
+  it('reports direct and relay candidate paths after connection', async () => {
+    for (const [candidateType, expected] of [
+      ['host', 'direct'],
+      ['relay', 'relay'],
+    ] as const) {
+      const transport = new FakeTransport();
+      const connection = new FakeConnection();
+      connection.candidateStats = [
+        {
+          id: 'pair',
+          type: 'candidate-pair',
+          state: 'succeeded',
+          nominated: true,
+          localCandidateId: 'local',
+        } as unknown as RTCStats,
+        {
+          id: 'local',
+          type: 'local-candidate',
+          candidateType,
+        } as unknown as RTCStats,
+      ];
+      const peer = createDuplexPeer(transport, {
+        polite: true,
+        localStream: createLocalStream(),
+        createPeerConnection: () => connection.asPeerConnection(),
+      });
+      const paths: string[] = [];
+      peer.subscribe((event) => {
+        if (event.type === 'connection-path') paths.push(event.path);
+      });
+      connection.connectionState = 'connected';
+      connection.iceConnectionState = 'connected';
+      connection.onconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('statechange'),
+      );
+      await Promise.resolve();
+      expect(paths.at(-1)).toBe(expected);
+      peer.close();
+    }
+  });
+
+  it('restarts a disconnected ICE session twice at most, then reports failure', async () => {
+    vi.useFakeTimers();
+    try {
+      const transport = new FakeTransport();
+      const connection = new FakeConnection();
+      const peer = createDuplexPeer(transport, {
+        polite: true,
+        localStream: createLocalStream(),
+        createPeerConnection: () => connection.asPeerConnection(),
+      });
+      const states: string[] = [];
+      peer.subscribe((event) => {
+        if (event.type === 'connection-state') states.push(event.state);
+      });
+      connection.connectionState = 'connected';
+      connection.iceConnectionState = 'connected';
+      connection.onconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('statechange'),
+      );
+      connection.connectionState = 'connected';
+      connection.iceConnectionState = 'disconnected';
+      connection.onconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('statechange'),
+      );
+      expect(states.at(-1)).toBe('reconnecting');
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(connection.restarted.count).toBe(1);
+      await vi.advanceTimersByTimeAsync(8000);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(connection.restarted.count).toBe(2);
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(states.at(-1)).toBe('failed');
+      peer.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not fail recovery when ICE reaches completed', async () => {
+    vi.useFakeTimers();
+    try {
+      const connection = new FakeConnection();
+      const peer = createDuplexPeer(new FakeTransport(), {
+        polite: true,
+        localStream: createLocalStream(),
+        createPeerConnection: () => connection.asPeerConnection(),
+      });
+      const states: string[] = [];
+      peer.subscribe((event) => {
+        if (event.type === 'connection-state') states.push(event.state);
+      });
+      connection.connectionState = 'connected';
+      connection.iceConnectionState = 'connected';
+      connection.onconnectionstatechange?.call(connection.asPeerConnection(), new Event('change'));
+      connection.iceConnectionState = 'disconnected';
+      connection.oniceconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('change'),
+      );
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(connection.restarted.count).toBe(1);
+      connection.iceConnectionState = 'completed';
+      connection.oniceconnectionstatechange?.call(
+        connection.asPeerConnection(),
+        new Event('change'),
+      );
+      expect(states.at(-1)).toBe('connected');
+      await vi.advanceTimersByTimeAsync(8000);
+      expect(states).not.toContain('failed');
+      peer.close();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

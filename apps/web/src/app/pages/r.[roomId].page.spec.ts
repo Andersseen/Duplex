@@ -3,27 +3,29 @@ import { TestBed } from '@angular/core/testing';
 import type { ComponentFixture } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { createRoomId } from '@duplex/protocol';
+import type { DuplexDataChannel, DuplexDataChannelEvent } from '@duplex/webrtc';
 import RoomPage from './r.[roomId].page';
 
+interface TestPeerEvent {
+  type: string;
+  state?: string;
+  media?: { audio: MediaStream | null; camera: null; screen: null };
+  channel?: DuplexDataChannel;
+  label?: string;
+}
+
 const peerHarness = vi.hoisted(() => ({
-  listeners: [] as ((event: {
-    type: string;
-    state?: string;
-    media?: { audio: MediaStream | null; camera: null; screen: null };
-  }) => void)[],
+  listeners: [] as ((event: TestPeerEvent) => void)[],
   closed: false,
 }));
 
 vi.mock('@duplex/webrtc', () => ({
+  toRtcIceServers: (
+    iceServers: { urls: string | string[]; username?: string; credential?: string }[],
+  ) => iceServers.map((server) => ({ ...server })),
   createDuplexPeer: vi.fn(() => ({
     connectionState: 'connecting',
-    subscribe: (
-      listener: (event: {
-        type: string;
-        state?: string;
-        media?: { audio: MediaStream | null; camera: null; screen: null };
-      }) => void,
-    ) => {
+    subscribe: (listener: (event: TestPeerEvent) => void) => {
       peerHarness.listeners.push(listener);
       return () => {
         peerHarness.listeners = peerHarness.listeners.filter((candidate) => candidate !== listener);
@@ -67,6 +69,55 @@ class FakeWebSocket {
     this.closed = true;
     this.readyState = 3;
   }
+}
+
+class FakeFileDataChannel implements DuplexDataChannel {
+  readonly label = 'duplex-file-transfer' as const;
+  state: DuplexDataChannel['state'] = 'open';
+  bufferedAmount = 0;
+  bufferedAmountLowThreshold = 256 * 1024;
+  readonly sentText: string[] = [];
+  readonly sentBinary: ArrayBuffer[] = [];
+  private listeners = new Set<(event: DuplexDataChannelEvent) => void>();
+
+  sendText(data: string): void {
+    this.sentText.push(data);
+  }
+  sendBinary(data: ArrayBuffer): void {
+    this.sentBinary.push(data);
+  }
+  waitForBufferedAmountLow(): Promise<void> {
+    return Promise.resolve();
+  }
+  subscribe(listener: (event: DuplexDataChannelEvent) => void): () => void {
+    this.listeners.add(listener);
+    listener({ type: 'open' });
+    return () => this.listeners.delete(listener);
+  }
+  close(): void {
+    this.state = 'closed';
+    this.receive({ type: 'close' });
+  }
+  receive(event: DuplexDataChannelEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
+  receiveControl(message: object): void {
+    this.receive({ type: 'message', data: JSON.stringify(message) });
+  }
+}
+
+function controlTypes(channel: FakeFileDataChannel): string[] {
+  return channel.sentText.map((text) => {
+    const parsed: unknown = JSON.parse(text);
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('type' in parsed) ||
+      typeof parsed.type !== 'string'
+    )
+      throw new Error('Unexpected control message.');
+    return parsed.type;
+  });
 }
 
 async function render(
@@ -137,6 +188,14 @@ describe('RoomPage', () => {
       type: 'joined',
       payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: false },
     });
+    socket?.receive({
+      type: 'rtc-config',
+      payload: {
+        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+        expiresAt: Date.now() + 60_000,
+        relayAvailable: false,
+      },
+    });
     fixture.detectChanges();
     expect(element.querySelector('h1')?.textContent).toContain('Waiting for someone');
 
@@ -167,6 +226,14 @@ describe('RoomPage', () => {
       type: 'joined',
       payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: true },
     });
+    socket?.receive({
+      type: 'rtc-config',
+      payload: {
+        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+        expiresAt: Date.now() + 60_000,
+        relayAvailable: false,
+      },
+    });
     peerHarness.listeners[0]?.({ type: 'connection-state', state: 'connected' });
     socket?.receive({ type: 'peer-left', payload: {} });
     fixture.detectChanges();
@@ -178,5 +245,99 @@ describe('RoomPage', () => {
     expect(element.querySelector('[role="alert"]')?.textContent).toContain(
       'already has two participants',
     );
+  });
+
+  it('shows file controls, consent, progress, cancellation and a completed download', async () => {
+    const { element, fixture } = await render(createRoomId());
+    element.querySelector('button')?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const socket = FakeWebSocket.latest;
+    socket?.receive({
+      type: 'joined',
+      payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: true },
+    });
+    socket?.receive({
+      type: 'rtc-config',
+      payload: {
+        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+        expiresAt: Date.now() + 60_000,
+        relayAvailable: false,
+      },
+    });
+    const channel = new FakeFileDataChannel();
+    peerHarness.listeners[0]?.({ type: 'connection-state', state: 'connected' });
+    peerHarness.listeners[0]?.({ type: 'data-channel', channel });
+    fixture.detectChanges();
+    expect(
+      [...element.querySelectorAll('button')].some((button) =>
+        button.textContent.includes('Send file'),
+      ),
+    ).toBe(true);
+
+    const cancelledId = crypto.randomUUID();
+    channel.receiveControl({
+      type: 'file-offer',
+      transferId: cancelledId,
+      protocolVersion: 1,
+      name: 'cancel.bin',
+      size: 4,
+      mimeType: 'application/octet-stream',
+    });
+    fixture.detectChanges();
+    expect(element.textContent).toContain('Peer wants to send');
+    [...element.querySelectorAll('button')]
+      .find((button) => button.textContent.trim() === 'Accept')
+      ?.click();
+    expect(controlTypes(channel)).toContain('file-accept');
+    fixture.detectChanges();
+    expect(
+      [...element.querySelectorAll('button')].some((button) =>
+        button.textContent.includes('Send file'),
+      ),
+    ).toBe(true);
+    channel.receive({ type: 'message', data: new Uint8Array([1, 2]).buffer });
+    fixture.detectChanges();
+    expect(element.textContent).toContain('50%');
+    [...element.querySelectorAll('button')]
+      .find((button) => button.textContent.trim() === 'Cancel')
+      ?.click();
+    expect(controlTypes(channel)).toContain('file-cancel');
+
+    const declinedId = crypto.randomUUID();
+    channel.receiveControl({
+      type: 'file-offer',
+      transferId: declinedId,
+      protocolVersion: 1,
+      name: 'declined.txt',
+      size: 1,
+      mimeType: 'text/plain',
+    });
+    fixture.detectChanges();
+    [...element.querySelectorAll('button')]
+      .find((button) => button.textContent.trim() === 'Decline')
+      ?.click();
+    expect(controlTypes(channel)).toContain('file-reject');
+
+    const completedId = crypto.randomUUID();
+    channel.receiveControl({
+      type: 'file-offer',
+      transferId: completedId,
+      protocolVersion: 1,
+      name: 'received.txt',
+      size: 2,
+      mimeType: 'text/plain',
+    });
+    fixture.detectChanges();
+    [...element.querySelectorAll('button')]
+      .find((button) => button.textContent.trim() === 'Accept')
+      ?.click();
+    channel.receive({ type: 'message', data: new Uint8Array([65, 66]).buffer });
+    channel.receiveControl({ type: 'file-complete', transferId: completedId, protocolVersion: 1 });
+    fixture.detectChanges();
+    expect(element.querySelector('a[download="received.txt"]')?.textContent).toContain('Download');
+    expect(controlTypes(channel)).toContain('file-complete');
+    channel.receive({ type: 'message', data: '{' });
+    fixture.detectChanges();
+    expect(element.querySelector('h1')?.textContent).toContain('Connected');
   });
 });

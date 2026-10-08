@@ -31,10 +31,37 @@ describe('deriveConnectionState', () => {
     expect(deriveConnectionState({ ...disconnected, hasConnected: false })).toBe('connecting');
   });
 
+  it('keeps an established peer in recovery while either browser state is failed or disconnected', () => {
+    expect(
+      deriveConnectionState({
+        connectionState: 'failed',
+        iceConnectionState: 'failed',
+        hasConnected: true,
+      }),
+    ).toBe('reconnecting');
+    expect(
+      deriveConnectionState({
+        connectionState: 'connected',
+        iceConnectionState: 'disconnected',
+        hasConnected: true,
+      }),
+    ).toBe('reconnecting');
+  });
+
   it('passes through terminal and connected states', () => {
     const base = { iceConnectionState: 'connected', hasConnected: true } as const;
     expect(deriveConnectionState({ ...base, connectionState: 'connected' })).toBe('connected');
-    expect(deriveConnectionState({ ...base, connectionState: 'failed' })).toBe('failed');
+    expect(deriveConnectionState({ ...base, connectionState: 'failed' })).toBe('reconnecting');
     expect(deriveConnectionState({ ...base, connectionState: 'closed' })).toBe('closed');
+  });
+
+  it('treats ICE completed as healthy after initial connection and recovery', () => {
+    expect(
+      deriveConnectionState({
+        connectionState: 'connected',
+        iceConnectionState: 'completed',
+        hasConnected: true,
+      }),
+    ).toBe('connected');
   });
 });
