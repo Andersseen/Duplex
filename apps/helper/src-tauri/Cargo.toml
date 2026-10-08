@@ -1,7 +1,7 @@
 [package]
 name = "duplex-helper"
 version = "0.0.0"
-description = "Duplex native helper: shell for future consent-based remote control."
+description = "Duplex native helper: temporary control-session bridge; native input is not implemented."
 edition = "2021"
 rust-version = "1.77"
 publish = false
@@ -15,3 +15,10 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+base64 = "0.22"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
+tokio = { version = "1", features = ["macros", "sync", "rt", "time"] }
+url = "2"

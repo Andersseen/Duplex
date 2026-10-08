@@ -233,14 +233,16 @@ describe('createDuplexPeer', () => {
       localStream: createLocalStream(),
       createPeerConnection: () => ownerConnection.asPeerConnection(),
     });
-    expect(ownerConnection.dataChannels).toHaveLength(3);
+    expect(ownerConnection.dataChannels).toHaveLength(4);
     expect(ownerConnection.dataChannels[0]?.label).toBe('duplex-file-transfer');
     expect(ownerConnection.dataChannels[1]?.label).toBe('duplex-collaboration');
     expect(ownerConnection.dataChannels[2]?.label).toBe('duplex-pointer');
+    expect(ownerConnection.dataChannels[3]?.label).toBe('duplex-control');
     expect(ownerConnection.dataChannelOptions).toEqual([
       { ordered: true },
       { ordered: true },
       { ordered: false, maxRetransmits: 0 },
+      { ordered: true },
     ]);
     const ownerEvents: string[] = [];
     let ownerChannel: DuplexDataChannel | undefined;
@@ -258,7 +260,7 @@ describe('createDuplexPeer', () => {
     const raw = ownerConnection.dataChannels[0];
     if (!raw) throw new Error('Impolite peer did not create its file channel.');
     raw.open();
-    expect(ownerEvents).toEqual(['channel', 'channel', 'channel', 'open']);
+    expect(ownerEvents).toEqual(['channel', 'channel', 'channel', 'channel', 'open']);
     ownerChannel?.sendText('control');
     const bytes = new Uint8Array([1, 2, 3]).buffer;
     ownerChannel?.sendBinary(bytes);
@@ -278,16 +280,19 @@ describe('createDuplexPeer', () => {
     polite.subscribe((event) => {
       if (event.type === 'data-channel') accepted.push(event.channel.label);
     });
-    const incoming = ['duplex-file-transfer', 'duplex-collaboration', 'duplex-pointer'].map(
-      (label) => new FakeDataChannel(label),
-    );
+    const incoming = [
+      'duplex-file-transfer',
+      'duplex-collaboration',
+      'duplex-pointer',
+      'duplex-control',
+    ].map((label) => new FakeDataChannel(label));
     for (const channel of incoming)
       politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
         channel: channel as unknown as RTCDataChannel,
       } as RTCDataChannelEvent);
     expect(accepted).toEqual(incoming.map((channel) => channel.label));
     expect(incoming[0]?.binaryType).toBe('arraybuffer');
-    const duplicate = new FakeDataChannel('duplex-pointer');
+    const duplicate = new FakeDataChannel('duplex-control');
     politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
       channel: duplicate as unknown as RTCDataChannel,
     } as RTCDataChannelEvent);
@@ -295,10 +300,13 @@ describe('createDuplexPeer', () => {
     politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
       channel: unknown as unknown as RTCDataChannel,
     } as RTCDataChannelEvent);
-    expect(accepted).toHaveLength(3);
+    expect(accepted).toHaveLength(4);
     expect(duplicate.readyState).toBe('closed');
     expect(unknown.readyState).toBe('closed');
     expect(politeConnection.closed).toBe(false);
+    incoming[3]?.close();
+    expect(incoming[0]?.readyState).not.toBe('closed');
+    expect(incoming[1]?.readyState).not.toBe('closed');
     owner.close();
     polite.close();
     expect(ownerConnection.dataChannels.every((channel) => channel.readyState === 'closed')).toBe(
@@ -312,7 +320,7 @@ describe('createDuplexPeer', () => {
       localStream: createLocalStream(),
       createPeerConnection: () => replacementConnection.asPeerConnection(),
     });
-    expect(replacementConnection.dataChannels).toHaveLength(3);
+    expect(replacementConnection.dataChannels).toHaveLength(4);
     expect(replacementConnection.dataChannels[0]).not.toBe(raw);
     replacement.close();
   });

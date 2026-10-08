@@ -1,6 +1,11 @@
 import { Injectable, signal } from '@angular/core';
 import type { OnDestroy } from '@angular/core';
-import { PROTOCOL_VERSION, roomIdSchema, serverSignalingMessageSchema } from '@duplex/protocol';
+import {
+  PROTOCOL_VERSION,
+  encodeHelperPairingBundle,
+  roomIdSchema,
+  serverSignalingMessageSchema,
+} from '@duplex/protocol';
 import type { RtcConfigMessage, ServerSignalingMessage, SignalingMessage } from '@duplex/protocol';
 import { createDuplexPeer, toRtcIceServers } from '@duplex/webrtc';
 import type { DuplexPeer, PeerSignalingMessage, SignalingTransport } from '@duplex/webrtc';
@@ -8,6 +13,7 @@ import { DATA_CHANNEL_LABELS } from '@duplex/webrtc';
 import type { DuplexDataChannel } from '@duplex/webrtc';
 import { FileTransferService } from './file-transfer.service';
 import { CollaborationService } from './collaboration.service';
+import { ControlService } from './control.service';
 
 export type CallState =
   | 'ready'
@@ -39,6 +45,10 @@ export class CallSessionService implements OnDestroy {
   readonly fileChannelOpen = signal(false);
   readonly fileTransfers = new FileTransferService();
   readonly collaboration = new CollaborationService();
+  readonly control = new ControlService();
+  readonly helperPairingCode = signal<string | null>(null);
+  readonly helperPairingExpiresAt = signal<number | null>(null);
+  readonly helperConnected = signal(false);
 
   private socket: WebSocket | null = null;
   private peer: DuplexPeer | null = null;
@@ -53,10 +63,43 @@ export class CallSessionService implements OnDestroy {
   private displayTrack: MediaStreamTrack | null = null;
   private timeoutId: ReturnType<typeof setTimeout> | null = null;
   private rtcRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private helperPairingTimer: ReturnType<typeof setTimeout> | null = null;
   private leaving = false;
   private lastJoined: Extract<ServerSignalingMessage, { type: 'joined' }>['payload'] | null = null;
   private rtcConfig: RtcConfigMessage['payload'] | null = null;
   private peerPresent = false;
+  private currentRoomId: string | null = null;
+  private configuredApiOrigin: string | null = null;
+
+  constructor() {
+    this.collaboration.setPeerMediaListener((source, surfaceId) => {
+      this.control.setPeerMedia(source, surfaceId);
+    });
+    this.control.setHelperSessionListener((session, reason, previous) => {
+      if (this.socket?.readyState !== WebSocket.OPEN) return;
+      if (session) {
+        this.socket.send(
+          JSON.stringify({
+            type: 'helper-session-authorized',
+            session: {
+              controlSessionId: session.controlSessionId,
+              surfaceId: session.surfaceId,
+              scopes: session.scopes,
+              expiresAt: session.expiresAt,
+            },
+          }),
+        );
+      } else if (previous) {
+        this.socket.send(
+          JSON.stringify({
+            type: 'helper-session-revoked',
+            controlSessionId: previous.controlSessionId,
+            reason: reason ?? 'disconnected',
+          }),
+        );
+      }
+    });
+  }
 
   async join(roomId: string): Promise<void> {
     if (
@@ -73,6 +116,11 @@ export class CallSessionService implements OnDestroy {
     this.lastJoined = null;
     this.rtcConfig = null;
     this.peerPresent = false;
+    this.currentRoomId = roomId;
+    this.helperPairingCode.set(null);
+    this.helperPairingExpiresAt.set(null);
+    this.helperConnected.set(false);
+    this.control.setHelperConnected(false);
     this.connectionPath.set('unknown');
     this.state.set('requesting-media');
     try {
@@ -91,6 +139,7 @@ export class CallSessionService implements OnDestroy {
     try {
       const apiOrigin = import.meta.env.VITE_DUPLEX_API_ORIGIN?.replace(/\/+$/, '');
       const apiUrl = apiOrigin ? new URL(apiOrigin) : null;
+      this.configuredApiOrigin = apiUrl?.origin ?? `${location.protocol}//${location.host}`;
       const scheme = apiUrl
         ? apiUrl.protocol === 'https:'
           ? 'wss:'
@@ -143,6 +192,7 @@ export class CallSessionService implements OnDestroy {
     if (this.cameraEnabled()) {
       this.cameraEnabled.set(false);
       if (!this.screenSharing()) this.collaboration.setLocalVideoSource('none');
+      this.syncControlSurface();
       try {
         if (!this.screenSharing()) await this.replaceOutgoingVideo(null);
       } catch {
@@ -170,6 +220,7 @@ export class CallSessionService implements OnDestroy {
     this.cameraTrack = track;
     this.cameraEnabled.set(true);
     if (!this.screenSharing()) this.collaboration.setLocalVideoSource('camera');
+    if (!this.screenSharing()) this.syncControlSurface();
     this.updateLocalVideo();
     try {
       if (!this.screenSharing()) await this.replaceOutgoingVideo(track);
@@ -206,6 +257,7 @@ export class CallSessionService implements OnDestroy {
     };
     this.screenSharing.set(true);
     this.collaboration.setLocalVideoSource('screen');
+    this.syncControlSurface();
     this.updateLocalVideo();
     try {
       await this.replaceOutgoingVideo(track);
@@ -224,6 +276,7 @@ export class CallSessionService implements OnDestroy {
     this.displayStream = null;
     this.screenSharing.set(false);
     this.collaboration.setLocalVideoSource(this.cameraEnabled() ? 'camera' : 'none');
+    this.syncControlSurface();
     if (track) track.onended = null;
     this.stopTrack(track);
     this.updateLocalVideo();
@@ -238,6 +291,28 @@ export class CallSessionService implements OnDestroy {
 
   copyLink(): string {
     return this.roomUrl();
+  }
+
+  createHelperPairingCode(): void {
+    if (this.socket?.readyState !== WebSocket.OPEN || !this.screenSharing()) return;
+    this.socket.send(
+      JSON.stringify({ type: 'helper-pairing-create', payload: {} } satisfies SignalingMessage),
+    );
+  }
+
+  async copyHelperPairingCode(): Promise<boolean> {
+    const code = this.helperPairingCode();
+    if (!code) return false;
+    try {
+      await navigator.clipboard.writeText(code);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private syncControlSurface(): void {
+    this.control.setLocalScreen(this.screenSharing() ? this.collaboration.localSurfaceId() : null);
   }
 
   leave(): void {
@@ -292,6 +367,40 @@ export class CallSessionService implements OnDestroy {
       );
     } else if (message.type === 'rtc-config') {
       this.applyRtcConfiguration(message);
+    } else if (message.type === 'helper-pairing-created') {
+      if (!this.currentRoomId || !this.configuredApiOrigin) return;
+      try {
+        this.helperPairingCode.set(
+          encodeHelperPairingBundle({
+            version: 1,
+            apiOrigin: this.configuredApiOrigin,
+            roomId: this.currentRoomId,
+            token: message.payload.token,
+          }),
+        );
+        this.helperPairingExpiresAt.set(message.payload.expiresAt);
+        if (this.helperPairingTimer) clearTimeout(this.helperPairingTimer);
+        this.helperPairingTimer = setTimeout(
+          () => {
+            this.helperPairingCode.set(null);
+            this.helperPairingExpiresAt.set(null);
+            this.helperPairingTimer = null;
+          },
+          Math.max(0, message.payload.expiresAt - Date.now()),
+        );
+      } catch {
+        this.sessionError.set('Could not create a safe helper pairing code.');
+      }
+    } else if (message.type === 'helper-paired') {
+      if (this.helperPairingTimer) clearTimeout(this.helperPairingTimer);
+      this.helperPairingTimer = null;
+      this.helperPairingCode.set(null);
+      this.helperPairingExpiresAt.set(null);
+      this.helperConnected.set(true);
+      this.control.setHelperConnected(true);
+    } else if (message.type === 'helper-disconnected') {
+      this.helperConnected.set(false);
+      this.control.setHelperConnected(false);
     } else {
       this.transportListener?.(message);
     }
@@ -365,6 +474,8 @@ export class CallSessionService implements OnDestroy {
           });
           this.dataChannelUnsubscribers.set(event.channel, unsubscribe);
           this.fileChannelOpen.set(event.channel.state === 'open');
+        } else if (event.channel.label === DATA_CHANNEL_LABELS.control) {
+          this.control.attachChannel(event.channel);
         } else {
           this.collaboration.attachChannel(event.channel);
         }
@@ -420,6 +531,7 @@ export class CallSessionService implements OnDestroy {
     for (const unsubscribe of this.dataChannelUnsubscribers.values()) unsubscribe();
     this.dataChannelUnsubscribers.clear();
     this.fileChannelOpen.set(false);
+    this.control.peerChanged();
     this.fileTransfers.peerChanged();
     this.collaboration.peerChanged();
     this.peerUnsubscribe?.();
@@ -443,7 +555,11 @@ export class CallSessionService implements OnDestroy {
     this.timeoutId = null;
     if (this.rtcRefreshTimer) clearTimeout(this.rtcRefreshTimer);
     this.rtcRefreshTimer = null;
+    if (this.helperPairingTimer) clearTimeout(this.helperPairingTimer);
+    this.helperPairingTimer = null;
     this.closePeer();
+    this.control.setLocalScreen(null);
+    this.currentRoomId = null;
     this.fileTransfers.destroy();
     this.transportListener = null;
     this.callTransport = null;

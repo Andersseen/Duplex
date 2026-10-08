@@ -6,22 +6,42 @@ import {
   protocolErrorMessageSchema,
   roomFullMessageSchema,
   serverSignalingMessageSchema,
+  helperBridgeMessageSchema,
 } from '@duplex/protocol';
 import type { ServerSignalingMessage } from '@duplex/protocol';
 import { z } from 'zod';
 import { generateRtcConfiguration } from './rtc-config';
 
 const MAX_MESSAGE_BYTES = 128 * 1024;
-const attachmentSchema = z
+const participantAttachmentSchema = z
   .object({
+    kind: z.literal('participant'),
     participantId: z.string().min(16).max(64),
     joined: z.boolean(),
     polite: z.boolean().optional(),
     protocolVersion: z.number().int().positive().optional(),
     lastRtcConfigIssuedAt: z.number().int().nonnegative().optional(),
+    helperPairingTokenHash: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
+    helperPairingExpiresAt: z.number().int().positive().optional(),
+    helperPaired: z.boolean().optional(),
   })
   .strict();
-type ParticipantAttachment = z.infer<typeof attachmentSchema>;
+const helperAttachmentSchema = z
+  .object({
+    kind: z.literal('helper'),
+    helperId: z.string().min(16).max(64),
+    ownerParticipantId: z.string().min(16).max(64),
+    pairedAt: z.number().int().positive(),
+  })
+  .strict();
+const attachmentSchema = z.discriminatedUnion('kind', [
+  participantAttachmentSchema,
+  helperAttachmentSchema,
+]);
+type ParticipantAttachment = z.infer<typeof participantAttachmentSchema>;
 
 function randomParticipantId(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -30,7 +50,7 @@ function randomParticipantId(): string {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
-function attachment(socket: WebSocket): ParticipantAttachment | null {
+function attachment(socket: WebSocket): z.infer<typeof attachmentSchema> | null {
   const parsed = attachmentSchema.safeParse(socket.deserializeAttachment());
   return parsed.success ? parsed.data : null;
 }
@@ -62,7 +82,8 @@ function sendProtocolError(
 export class CallRoom extends DurableObject {
   static readonly capacity = MAX_ROOM_PARTICIPANTS;
 
-  override fetch(request: Request): Response {
+  override async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname.endsWith('/helper/ws')) return this.connectHelper(request);
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
       return Response.json(
         { error: 'websocket_required', message: 'This endpoint requires a WebSocket upgrade.' },
@@ -74,6 +95,7 @@ export class CallRoom extends DurableObject {
     const client = pair[0];
     const server = pair[1];
     server.serializeAttachment({
+      kind: 'participant',
       participantId: randomParticipantId(),
       joined: false,
     } satisfies ParticipantAttachment);
@@ -85,6 +107,23 @@ export class CallRoom extends DurableObject {
     const current = attachment(socket);
     if (!current) {
       socket.close(1008, 'Invalid participant attachment');
+      return;
+    }
+    if (current.kind === 'helper') {
+      if (typeof data !== 'string' || new TextEncoder().encode(data).byteLength > 4096) {
+        socket.close(1008, 'Invalid helper message');
+        return;
+      }
+      let helperRaw: unknown;
+      try {
+        helperRaw = JSON.parse(data);
+      } catch {
+        socket.close(1008, 'Invalid helper message');
+        return;
+      }
+      const helperMessage = helperBridgeMessageSchema.safeParse(helperRaw);
+      if (!helperMessage.success || helperMessage.data.type !== 'helper-ready')
+        socket.close(1008, 'Invalid helper message');
       return;
     }
     const size =
@@ -142,7 +181,10 @@ export class CallRoom extends DurableObject {
       const updated = {
         ...current,
         joined: true,
-        polite: peerPresent ? !(existingPeer?.polite ?? false) : false,
+        polite:
+          peerPresent && existingPeer?.kind === 'participant'
+            ? !(existingPeer.polite ?? false)
+            : false,
         protocolVersion: PROTOCOL_VERSION,
         lastRtcConfigIssuedAt: Date.now(),
       };
@@ -169,7 +211,13 @@ export class CallRoom extends DurableObject {
     }
     if (message.type === 'leave') {
       this.notifyPeerLeft(socket);
-      socket.serializeAttachment({ ...current, joined: false });
+      this.closeOwnerHelper(current.participantId);
+      socket.serializeAttachment({
+        ...current,
+        joined: false,
+        helperPairingTokenHash: undefined,
+        helperPairingExpiresAt: undefined,
+      });
       socket.close(1000, 'Participant left');
       return;
     }
@@ -179,6 +227,40 @@ export class CallRoom extends DurableObject {
       const updated = { ...current, lastRtcConfigIssuedAt: Date.now() };
       socket.serializeAttachment(updated);
       await this.sendRtcConfiguration(socket, updated.participantId);
+      return;
+    }
+    if (message.type === 'helper-pairing-create') {
+      if (current.helperPaired) return;
+      const tokenBytes = crypto.getRandomValues(new Uint8Array(32));
+      let binary = '';
+      for (const byte of tokenBytes) binary += String.fromCharCode(byte);
+      const token = btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+      const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token));
+      const hash = [...new Uint8Array(digest)]
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+      const expiresAt = Date.now() + 2 * 60 * 1000;
+      socket.serializeAttachment({
+        ...current,
+        helperPairingTokenHash: hash,
+        helperPairingExpiresAt: expiresAt,
+      });
+      socket.send(
+        JSON.stringify({ type: 'helper-pairing-created', payload: { token, expiresAt } }),
+      );
+      return;
+    }
+    if (message.type === 'helper-session-authorized' || message.type === 'helper-session-revoked') {
+      if (!current.helperPaired) return;
+      for (const helperSocket of this.ctx.getWebSockets()) {
+        const helper = attachment(helperSocket);
+        if (
+          helper?.kind === 'helper' &&
+          helper.ownerParticipantId === current.participantId &&
+          helperSocket.readyState === WebSocket.OPEN
+        )
+          helperSocket.send(JSON.stringify(message));
+      }
       return;
     }
     for (const peer of this.participants()) {
@@ -204,13 +286,29 @@ export class CallRoom extends DurableObject {
   override webSocketClose(socket: WebSocket): void {
     this.notifyPeerLeft(socket);
     const current = attachment(socket);
-    if (current?.joined) socket.serializeAttachment({ ...current, joined: false });
+    if (current?.kind === 'participant' && current.joined) {
+      this.closeOwnerHelper(current.participantId);
+      socket.serializeAttachment({
+        ...current,
+        joined: false,
+        helperPairingTokenHash: undefined,
+        helperPairingExpiresAt: undefined,
+      });
+    } else if (current?.kind === 'helper') this.helperClosed(current.ownerParticipantId);
   }
 
   override webSocketError(socket: WebSocket): void {
     this.notifyPeerLeft(socket);
     const current = attachment(socket);
-    if (current?.joined) socket.serializeAttachment({ ...current, joined: false });
+    if (current?.kind === 'participant' && current.joined) {
+      this.closeOwnerHelper(current.participantId);
+      socket.serializeAttachment({
+        ...current,
+        joined: false,
+        helperPairingTokenHash: undefined,
+        helperPairingExpiresAt: undefined,
+      });
+    } else if (current?.kind === 'helper') this.helperClosed(current.ownerParticipantId);
     try {
       socket.close(1011, 'WebSocket error');
     } catch {
@@ -219,13 +317,90 @@ export class CallRoom extends DurableObject {
   }
 
   private participants(): WebSocket[] {
-    return this.ctx.getWebSockets().filter((socket) => attachment(socket)?.joined === true);
+    return this.ctx.getWebSockets().filter((socket) => {
+      const value = attachment(socket);
+      return value?.kind === 'participant' && value.joined;
+    });
   }
 
   private notifyPeerLeft(socket: WebSocket): void {
-    if (attachment(socket)?.joined !== true) return;
+    const current = attachment(socket);
+    if (current?.kind !== 'participant' || !current.joined) return;
     for (const peer of this.participants()) {
       if (peer !== socket) send(peer, { type: 'peer-left', payload: {} });
     }
+  }
+
+  private async connectHelper(request: Request): Promise<Response> {
+    if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket')
+      return Response.json(
+        { error: 'websocket_required' },
+        { status: 426, headers: { Upgrade: 'websocket' } },
+      );
+    const authorization = request.headers.get('Authorization');
+    const match = authorization?.match(/^Bearer ([A-Za-z0-9_-]{43})$/);
+    if (!match) return Response.json({ error: 'unauthorized' }, { status: 401 });
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(match[1]));
+    const hash = [...new Uint8Array(digest)]
+      .map((byte) => byte.toString(16).padStart(2, '0'))
+      .join('');
+    const owner = this.participants().find((socket) => {
+      const value = attachment(socket);
+      return value?.kind === 'participant' && value.helperPairingTokenHash === hash;
+    });
+    const ownerData = owner ? attachment(owner) : null;
+    if (
+      !owner ||
+      ownerData?.kind !== 'participant' ||
+      !ownerData.helperPairingExpiresAt ||
+      ownerData.helperPairingExpiresAt <= Date.now()
+    )
+      return Response.json({ error: 'unauthorized' }, { status: 401 });
+    if (
+      this.ctx.getWebSockets().some((socket) => {
+        const value = attachment(socket);
+        return value?.kind === 'helper' && value.ownerParticipantId === ownerData.participantId;
+      })
+    )
+      return Response.json({ error: 'helper_already_connected' }, { status: 409 });
+    owner.serializeAttachment({
+      ...ownerData,
+      helperPairingTokenHash: undefined,
+      helperPairingExpiresAt: undefined,
+      helperPaired: true,
+    });
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.serializeAttachment({
+      kind: 'helper',
+      helperId: randomParticipantId(),
+      ownerParticipantId: ownerData.participantId,
+      pairedAt: Date.now(),
+    } satisfies z.infer<typeof helperAttachmentSchema>);
+    this.ctx.acceptWebSocket(server);
+    if (owner.readyState === WebSocket.OPEN)
+      owner.send(JSON.stringify({ type: 'helper-paired', payload: {} }));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private closeOwnerHelper(participantId: string): void {
+    for (const socket of this.ctx.getWebSockets()) {
+      const value = attachment(socket);
+      if (value?.kind === 'helper' && value.ownerParticipantId === participantId)
+        socket.close(1000, 'Owner left');
+    }
+  }
+
+  private helperClosed(participantId: string): void {
+    const owner = this.participants().find((socket) => {
+      const value = attachment(socket);
+      return value?.kind === 'participant' && value.participantId === participantId;
+    });
+    if (!owner) return;
+    const value = attachment(owner);
+    if (value?.kind === 'participant') owner.serializeAttachment({ ...value, helperPaired: false });
+    if (owner.readyState === WebSocket.OPEN)
+      owner.send(JSON.stringify({ type: 'helper-disconnected', payload: {} }));
   }
 }
