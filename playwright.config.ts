@@ -4,6 +4,9 @@ const inCi = Boolean(process.env.CI);
 
 export default defineConfig({
   testDir: './e2e',
+  // These have their own configs: production-header checks need the built Worker, and the
+  // screenshot suite is a documentation tool rather than a test.
+  testIgnore: ['production/**', 'screenshots/**'],
   fullyParallel: false,
   retries: inCi ? 1 : 0,
   workers: 1,
