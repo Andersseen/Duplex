@@ -59,7 +59,7 @@ vi.mock('@duplex/webrtc', () => ({
 }));
 
 import { CallSessionService } from './call-session.service';
-import { createRoomId } from '@duplex/protocol';
+import { createRoomId, decodeHelperPairingBundle } from '@duplex/protocol';
 
 class FakeWebSocket {
   static readonly OPEN = 1;
@@ -578,6 +578,193 @@ describe('CallSessionService', () => {
       expect(service.control.state()).toBe('controlling');
       expect(service.collaboration.tool()).toBe('off');
       service.leave();
+    });
+  });
+
+  describe('helper pairing', () => {
+    async function sharingService() {
+      getDisplayMedia.mockResolvedValue(stream(mediaTrack('video')));
+      const service = joinRoom();
+      const socket = await joined(service, true);
+      await service.toggleScreenSharing();
+      return { service, socket };
+    }
+
+    it('only requests a pairing code while a screen is being shared', async () => {
+      const service = joinRoom();
+      const socket = await joined(service, true);
+
+      service.createHelperPairingCode();
+      expect(socket.sent.some((message) => message.includes('helper-pairing-create'))).toBe(false);
+
+      getDisplayMedia.mockResolvedValue(stream(mediaTrack('video')));
+      await service.toggleScreenSharing();
+      service.createHelperPairingCode();
+      expect(socket.sent.some((message) => message.includes('helper-pairing-create'))).toBe(true);
+      service.leave();
+    });
+
+    it('wraps the server token in a bundle bound to this room and expires it locally', async () => {
+      vi.useFakeTimers();
+      try {
+        const { service, socket } = await sharingService();
+        socket.receive({
+          type: 'helper-pairing-created',
+          payload: { token: 'A'.repeat(43), expiresAt: Date.now() + 120_000 },
+        });
+
+        const code = service.helperPairingCode();
+        expect(code).toBeTruthy();
+        const bundle = decodeHelperPairingBundle(code ?? '');
+        expect(bundle.token).toBe('A'.repeat(43));
+        expect(bundle.roomId).toBe(socket.url.split('/rooms/')[1]?.split('/')[0]);
+
+        await vi.advanceTimersByTimeAsync(120_001);
+        expect(service.helperPairingCode()).toBeNull();
+        service.leave();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('drops the code once the helper pairs and tracks its connection', async () => {
+      const { service, socket } = await sharingService();
+      socket.receive({
+        type: 'helper-pairing-created',
+        payload: { token: 'B'.repeat(43), expiresAt: Date.now() + 120_000 },
+      });
+      expect(service.helperPairingCode()).not.toBeNull();
+
+      socket.receive({ type: 'helper-paired', payload: {} });
+      expect(service.helperConnected()).toBe(true);
+      expect(service.helperPairingCode()).toBeNull();
+      expect(service.helperPairingExpiresAt()).toBeNull();
+
+      socket.receive({ type: 'helper-disconnected', payload: {} });
+      expect(service.helperConnected()).toBe(false);
+      service.leave();
+    });
+
+    it('forgets pairing state when the call is left', async () => {
+      const { service, socket } = await sharingService();
+      socket.receive({
+        type: 'helper-pairing-created',
+        payload: { token: 'C'.repeat(43), expiresAt: Date.now() + 120_000 },
+      });
+
+      service.leave();
+
+      expect(service.helperPairingCode()).toBeNull();
+      expect(service.helperConnected()).toBe(false);
+    });
+
+    it('reports whether the pairing code could be copied', async () => {
+      const { service, socket } = await sharingService();
+      await expect(service.copyHelperPairingCode()).resolves.toBe(false);
+      socket.receive({
+        type: 'helper-pairing-created',
+        payload: { token: 'D'.repeat(43), expiresAt: Date.now() + 120_000 },
+      });
+
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+      await expect(service.copyHelperPairingCode()).resolves.toBe(true);
+      expect(writeText).toHaveBeenCalledWith(service.helperPairingCode());
+
+      writeText.mockRejectedValue(new Error('denied'));
+      await expect(service.copyHelperPairingCode()).resolves.toBe(false);
+      service.leave();
+    });
+  });
+
+  describe('room failures', () => {
+    it('explains a full room and closes the socket', async () => {
+      const service = joinRoom();
+      const socket = await joined(service);
+
+      socket.receive({ type: 'room-full', payload: { reason: 'capacity' } });
+
+      expect(service.state()).toBe('failed');
+      expect(service.sessionError()).toContain('already has two participants');
+      expect(socket.closed).toBe(true);
+    });
+
+    it('tells the user to reload on a protocol mismatch', async () => {
+      const service = joinRoom();
+      const socket = await joined(service);
+
+      socket.receive({
+        type: 'protocol-error',
+        payload: { code: 'protocol_mismatch', message: 'old client' },
+      });
+
+      expect(service.state()).toBe('failed');
+      expect(service.sessionError()).toContain('Reload the page');
+    });
+
+    it('surfaces other protocol errors verbatim', async () => {
+      const service = joinRoom();
+      const socket = await joined(service);
+
+      socket.receive({
+        type: 'protocol-error',
+        payload: { code: 'invalid_message', message: 'Message must contain valid JSON.' },
+      });
+
+      expect(service.sessionError()).toBe('Message must contain valid JSON.');
+    });
+
+    it('fails when the socket errors or closes unexpectedly, but not on a normal close', async () => {
+      const errored = joinRoom();
+      await joined(errored);
+      FakeWebSocket.latest?.onerror?.(new Event('error'));
+      expect(errored.state()).toBe('failed');
+
+      const dropped = joinRoom();
+      await joined(dropped);
+      FakeWebSocket.latest?.onclose?.(new CloseEvent('close', { code: 1006 }));
+      expect(dropped.sessionError()).toContain('connection closed');
+
+      const incompatible = joinRoom();
+      await joined(incompatible);
+      FakeWebSocket.latest?.onclose?.(new CloseEvent('close', { code: 4001 }));
+      expect(incompatible.sessionError()).toContain('not compatible');
+
+      const normal = joinRoom();
+      await joined(normal);
+      FakeWebSocket.latest?.onclose?.(new CloseEvent('close', { code: 1000 }));
+      expect(normal.state()).toBe('waiting-for-peer');
+      normal.leave();
+    });
+
+    it('gives up when the room never answers', async () => {
+      vi.useFakeTimers();
+      try {
+        const service = joinRoom();
+        await vi.advanceTimersByTimeAsync(10_001);
+
+        expect(service.state()).toBe('failed');
+        expect(service.sessionError()).toContain('did not respond');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.each([
+      ['non-JSON text', '{not json', 'invalid message'],
+      [
+        'an unknown message type',
+        JSON.stringify({ type: 'unknown-type', payload: {} }),
+        'unsupported',
+      ],
+    ])('fails closed on %s from the room', async (_label, data, expected) => {
+      const service = joinRoom();
+      const socket = await joined(service);
+
+      socket.onmessage?.(new MessageEvent('message', { data }));
+
+      expect(service.state()).toBe('failed');
+      expect(service.sessionError()).toContain(expected);
     });
   });
 });
