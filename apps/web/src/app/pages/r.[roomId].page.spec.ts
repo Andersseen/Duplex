@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TestBed } from '@angular/core/testing';
-import type { ComponentFixture } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { createRoomId } from '@duplex/protocol';
 import type { DuplexDataChannel, DuplexDataChannelEvent } from '@duplex/webrtc';
+import { render as renderComponent, screen, within } from '@testing-library/angular';
+import { userEvent } from '@testing-library/user-event';
 import RoomPage from './r.[roomId].page';
 
 interface TestPeerEvent {
@@ -127,14 +127,37 @@ function controlTypes(channel: FakeFileDataChannel): string[] {
   });
 }
 
-async function render(
-  roomId: string,
-): Promise<{ element: HTMLElement; fixture: ComponentFixture<RoomPage> }> {
-  TestBed.configureTestingModule({ providers: [provideRouter([])] });
-  const fixture = TestBed.createComponent(RoomPage);
-  fixture.componentRef.setInput('roomId', roomId);
-  await fixture.whenStable();
-  return { element: fixture.nativeElement as HTMLElement, fixture };
+const RTC_CONFIG = {
+  type: 'rtc-config',
+  payload: {
+    iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
+    expiresAt: Date.now() + 60_000,
+    relayAvailable: false,
+  },
+};
+
+async function renderRoom(roomId: string) {
+  return renderComponent(RoomPage, {
+    inputs: { roomId },
+    providers: [provideRouter([])],
+  });
+}
+
+/** Joins as the impolite peer and waits until the fake socket has seen the join message. */
+async function joinRoom(peerPresent: boolean): Promise<FakeWebSocket> {
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: 'Join call' }));
+  await vi.waitFor(() => {
+    expect(FakeWebSocket.latest?.sent[0]).toContain('"type":"join"');
+  });
+  const socket = FakeWebSocket.latest;
+  if (!socket) throw new Error('The room WebSocket was not opened.');
+  socket.receive({
+    type: 'joined',
+    payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent },
+  });
+  socket.receive(RTC_CONFIG);
+  return socket;
 }
 
 describe('RoomPage', () => {
@@ -157,14 +180,19 @@ describe('RoomPage', () => {
   });
 
   it('shows a ready-to-join state for a valid room', async () => {
-    const { element } = await render(createRoomId());
-    expect(element.querySelector('h1')?.textContent).toContain('Ready to join');
-    expect(element.querySelector('button')?.textContent).toContain('Join call');
+    await renderRoom(createRoomId());
+
+    expect(screen.getByRole('heading', { name: 'Ready to join' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Join call' })).toBeEnabled();
+    expect(screen.queryByRole('group', { name: 'Call controls' })).not.toBeInTheDocument();
   });
 
   it('rejects ids that are not Duplex room ids', async () => {
-    const { element } = await render('1');
-    expect(element.querySelector('h1')?.textContent).toContain('Invalid room link');
+    await renderRoom('1');
+
+    expect(screen.getByRole('heading', { name: 'Invalid room link' })).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Start a new call' })).toHaveAttribute('href', '/');
+    expect(screen.queryByRole('button', { name: 'Join call' })).not.toBeInTheDocument();
   });
 
   it('shows a clear error when microphone access fails', async () => {
@@ -172,179 +200,127 @@ describe('RoomPage', () => {
       configurable: true,
       value: { getUserMedia: vi.fn().mockRejectedValue(new Error('denied')) },
     });
-    const { element, fixture } = await render(createRoomId());
-    const button = element.querySelector('button');
-    button?.click();
-    await fixture.whenStable();
-    await Promise.resolve();
-    fixture.detectChanges();
-    expect(element.querySelector('[role="alert"]')?.textContent).toContain('Microphone permission');
-    expect(element.querySelector('h1')?.textContent).toContain('Could not join');
+    const user = userEvent.setup();
+    await renderRoom(createRoomId());
+
+    await user.click(screen.getByRole('button', { name: 'Join call' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Microphone permission');
+    expect(screen.getByRole('heading', { name: 'Could not join the call' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
   });
 
   it('moves through joining, waiting, peer arrival, connected, mute, and leave cleanup', async () => {
-    const { element, fixture } = await render(createRoomId());
-    element.querySelector('button')?.click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    fixture.detectChanges();
-    expect(element.querySelector('h1')?.textContent).toContain('Joining');
+    const user = userEvent.setup();
+    await renderRoom(createRoomId());
 
-    const socket = FakeWebSocket.latest;
-    expect(socket?.sent[0]).toContain('"type":"join"');
-    socket?.receive({
-      type: 'joined',
-      payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: false },
-    });
-    socket?.receive({
-      type: 'rtc-config',
-      payload: {
-        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
-        expiresAt: Date.now() + 60_000,
-        relayAvailable: false,
-      },
-    });
-    fixture.detectChanges();
-    expect(element.querySelector('h1')?.textContent).toContain('Waiting for someone');
+    const socket = await joinRoom(false);
 
-    socket?.receive({ type: 'peer-joined', payload: { participantId: 'qrstuvwxyzabcdef' } });
+    expect(
+      await screen.findByRole('heading', { name: 'Waiting for someone to join…' }),
+    ).toBeVisible();
+    expect(screen.getByLabelText('Copy this link')).toHaveAttribute('readonly');
+
+    socket.receive({ type: 'peer-joined', payload: { participantId: 'qrstuvwxyzabcdef' } });
     peerHarness.listeners[0]?.({ type: 'connection-state', state: 'connected' });
-    fixture.detectChanges();
-    expect(element.querySelector('h1')?.textContent).toContain('Connected');
-    const buttons = [...element.querySelectorAll('button')];
-    buttons.find((button) => button.textContent.trim() === 'Mute')?.click();
-    expect(track.enabled).toBe(false);
+    expect(await screen.findByRole('heading', { name: 'Connected' })).toBeVisible();
+    expect(screen.queryByLabelText('Copy this link')).not.toBeInTheDocument();
 
-    [...element.querySelectorAll('button')]
-      .find((button) => button.textContent.trim() === 'Leave')
-      ?.click();
-    fixture.detectChanges();
-    expect(element.querySelector('h1')?.textContent).toContain('You left the call');
+    const mute = screen.getByRole('button', { name: 'Mute' });
+    expect(mute).toHaveAttribute('aria-pressed', 'true');
+    await user.click(mute);
+    expect(track.enabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Unmute' })).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(screen.getByRole('button', { name: 'Leave' }));
+
+    expect(await screen.findByRole('heading', { name: 'You left the call' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Rejoin call' })).toBeVisible();
     expect(track.stop).toHaveBeenCalledOnce();
     expect(peerHarness.closed).toBe(true);
-    expect(socket?.closed).toBe(true);
+    expect(socket.closed).toBe(true);
   });
 
-  it('returns to waiting when the peer leaves and shows a clean full-room error', async () => {
-    const { element, fixture } = await render(createRoomId());
-    element.querySelector('button')?.click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const socket = FakeWebSocket.latest;
-    socket?.receive({
-      type: 'joined',
-      payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: true },
-    });
-    socket?.receive({
-      type: 'rtc-config',
-      payload: {
-        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
-        expiresAt: Date.now() + 60_000,
-        relayAvailable: false,
-      },
-    });
-    peerHarness.listeners[0]?.({ type: 'connection-state', state: 'connected' });
-    socket?.receive({ type: 'peer-left', payload: {} });
-    fixture.detectChanges();
-    expect(element.querySelector('h1')?.textContent).toContain('Waiting for someone');
+  it('copies the invite link and confirms it', async () => {
+    vi.stubGlobal('isSecureContext', true);
+    // user-event installs its own clipboard stub, so read back what the page wrote to it.
+    const user = userEvent.setup();
+    await renderRoom(createRoomId());
+    await joinRoom(false);
 
-    socket?.receive({ type: 'room-full', payload: { reason: 'capacity' } });
-    fixture.detectChanges();
-    expect(element.querySelector('h1')?.textContent).toContain('Could not join');
-    expect(element.querySelector('[role="alert"]')?.textContent).toContain(
-      'already has two participants',
+    await user.click(await screen.findByRole('button', { name: 'Copy link' }));
+
+    expect(await screen.findByRole('button', { name: 'Copied' })).toBeVisible();
+    expect(await navigator.clipboard.readText()).toBe(
+      screen.getByLabelText<HTMLInputElement>('Copy this link').value,
     );
   });
 
+  it('returns to waiting when the peer leaves and shows a clean full-room error', async () => {
+    await renderRoom(createRoomId());
+    const socket = await joinRoom(true);
+    peerHarness.listeners[0]?.({ type: 'connection-state', state: 'connected' });
+
+    socket.receive({ type: 'peer-left', payload: {} });
+    expect(
+      await screen.findByRole('heading', { name: 'Waiting for someone to join…' }),
+    ).toBeVisible();
+
+    socket.receive({ type: 'room-full', payload: { reason: 'capacity' } });
+    expect(await screen.findByRole('heading', { name: 'Could not join the call' })).toBeVisible();
+    expect(screen.getByRole('alert')).toHaveTextContent('already has two participants');
+  });
+
   it('shows file controls, consent, progress, cancellation and a completed download', async () => {
-    const { element, fixture } = await render(createRoomId());
-    element.querySelector('button')?.click();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    const socket = FakeWebSocket.latest;
-    socket?.receive({
-      type: 'joined',
-      payload: { participantId: 'abcdefghijklmnop', polite: false, peerPresent: true },
-    });
-    socket?.receive({
-      type: 'rtc-config',
-      payload: {
-        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }],
-        expiresAt: Date.now() + 60_000,
-        relayAvailable: false,
-      },
-    });
+    const user = userEvent.setup();
+    await renderRoom(createRoomId());
+    await joinRoom(true);
     const channel = new FakeFileDataChannel();
     peerHarness.listeners[0]?.({ type: 'connection-state', state: 'connected' });
     peerHarness.listeners[0]?.({ type: 'data-channel', channel });
-    fixture.detectChanges();
-    expect(
-      [...element.querySelectorAll('button')].some((button) =>
-        button.textContent.includes('Send file'),
-      ),
-    ).toBe(true);
+    expect(await screen.findByRole('button', { name: 'Send file' })).toBeVisible();
 
-    const cancelledId = crypto.randomUUID();
-    channel.receiveControl({
-      type: 'file-offer',
-      transferId: cancelledId,
-      protocolVersion: 1,
-      name: 'cancel.bin',
-      size: 4,
-      mimeType: 'application/octet-stream',
-    });
-    fixture.detectChanges();
-    expect(element.textContent).toContain('Peer wants to send');
-    [...element.querySelectorAll('button')]
-      .find((button) => button.textContent.trim() === 'Accept')
-      ?.click();
+    const offer = (transferId: string, name: string, size: number, mimeType: string) => {
+      channel.receiveControl({
+        type: 'file-offer',
+        transferId,
+        protocolVersion: 1,
+        name,
+        size,
+        mimeType,
+      });
+    };
+
+    offer(crypto.randomUUID(), 'cancel.bin', 4, 'application/octet-stream');
+    expect(await screen.findByText('Peer wants to send')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Accept' }));
     expect(controlTypes(channel)).toContain('file-accept');
-    fixture.detectChanges();
-    expect(
-      [...element.querySelectorAll('button')].some((button) =>
-        button.textContent.includes('Send file'),
-      ),
-    ).toBe(true);
     channel.receive({ type: 'message', data: new Uint8Array([1, 2]).buffer });
-    fixture.detectChanges();
-    expect(element.textContent).toContain('50%');
-    [...element.querySelectorAll('button')]
-      .find((button) => button.textContent.trim() === 'Cancel')
-      ?.click();
+    const progress = await screen.findByRole('progressbar', {
+      name: 'Transfer progress for cancel.bin',
+    });
+    expect(progress).toHaveAttribute('value', '2');
+    expect(screen.getByText('50%')).toBeVisible();
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(controlTypes(channel)).toContain('file-cancel');
 
-    const declinedId = crypto.randomUUID();
-    channel.receiveControl({
-      type: 'file-offer',
-      transferId: declinedId,
-      protocolVersion: 1,
-      name: 'declined.txt',
-      size: 1,
-      mimeType: 'text/plain',
-    });
-    fixture.detectChanges();
-    [...element.querySelectorAll('button')]
-      .find((button) => button.textContent.trim() === 'Decline')
-      ?.click();
+    offer(crypto.randomUUID(), 'declined.txt', 1, 'text/plain');
+    await user.click(await screen.findByRole('button', { name: 'Decline' }));
     expect(controlTypes(channel)).toContain('file-reject');
 
     const completedId = crypto.randomUUID();
-    channel.receiveControl({
-      type: 'file-offer',
-      transferId: completedId,
-      protocolVersion: 1,
-      name: 'received.txt',
-      size: 2,
-      mimeType: 'text/plain',
-    });
-    fixture.detectChanges();
-    [...element.querySelectorAll('button')]
-      .find((button) => button.textContent.trim() === 'Accept')
-      ?.click();
+    offer(completedId, 'received.txt', 2, 'text/plain');
+    await user.click(await screen.findByRole('button', { name: 'Accept' }));
     channel.receive({ type: 'message', data: new Uint8Array([65, 66]).buffer });
     channel.receiveControl({ type: 'file-complete', transferId: completedId, protocolVersion: 1 });
-    fixture.detectChanges();
-    expect(element.querySelector('a[download="received.txt"]')?.textContent).toContain('Download');
+    const transfers = screen.getByRole('region', { name: 'File transfers' });
+    expect(await within(transfers).findByRole('link', { name: 'Download' })).toHaveAttribute(
+      'download',
+      'received.txt',
+    );
     expect(controlTypes(channel)).toContain('file-complete');
+
     channel.receive({ type: 'message', data: '{' });
-    fixture.detectChanges();
-    expect(element.querySelector('h1')?.textContent).toContain('Connected');
+    expect(await screen.findByRole('heading', { name: 'Connected' })).toBeVisible();
   });
 });
