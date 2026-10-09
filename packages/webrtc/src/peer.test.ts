@@ -550,4 +550,143 @@ describe('createDuplexPeer', () => {
       vi.useRealTimers();
     }
   });
+
+  function track(kind: 'audio' | 'video', id: string, options: { muted?: boolean } = {}) {
+    return {
+      id,
+      kind,
+      muted: options.muted ?? false,
+      readyState: 'live',
+      onmute: null,
+      onunmute: null,
+      onended: null,
+    } as unknown as MediaStreamTrack;
+  }
+
+  function createPeer(overrides: { polite?: boolean } = {}) {
+    const transport = new FakeTransport();
+    const connection = new FakeConnection();
+    const peer = createDuplexPeer(transport, {
+      polite: overrides.polite ?? true,
+      localStream: createLocalStream(),
+      createPeerConnection: () => connection.asPeerConnection(),
+    });
+    return { transport, connection, peer };
+  }
+
+  it('publishes remote audio and video and drops tracks that mute or end', () => {
+    vi.stubGlobal(
+      'MediaStream',
+      class {
+        constructor(readonly tracks: MediaStreamTrack[]) {}
+      },
+    );
+    const { connection, peer } = createPeer();
+    const media: { audio: unknown; video: unknown }[] = [];
+    peer.subscribe((event) => {
+      if (event.type === 'remote-media') media.push(event.media);
+    });
+    const audio = track('audio', 'a1');
+    const video = track('video', 'v1');
+
+    connection.ontrack?.call(connection.asPeerConnection(), {
+      track: audio,
+      streams: [],
+    } as unknown as RTCTrackEvent);
+    connection.ontrack?.call(connection.asPeerConnection(), {
+      track: video,
+      streams: [{ getTracks: () => [video] }],
+    } as unknown as RTCTrackEvent);
+    const withVideo = media.length;
+    expect(media.at(-1)?.audio).not.toBeNull();
+    expect(media.at(-1)?.video).not.toBeNull();
+
+    Object.assign(video, { muted: true });
+    video.onmute?.call(video, new Event('mute'));
+    expect(media.length).toBe(withVideo + 1);
+    expect(media.at(-1)?.video).toBeNull();
+
+    audio.onended?.call(audio, new Event('ended'));
+    expect(media.at(-1)?.audio).toBeNull();
+    peer.close();
+    vi.unstubAllGlobals();
+  });
+
+  it('reports a failed connection when creating the offer throws', async () => {
+    const { connection, peer } = createPeer({ polite: false });
+    connection.setLocalDescription = () => Promise.reject(new Error('boom'));
+    const states: string[] = [];
+    peer.subscribe((event) => {
+      if (event.type === 'connection-state') states.push(event.state);
+    });
+
+    await connection.onnegotiationneeded?.call(
+      connection.asPeerConnection(),
+      new Event('negotiationneeded'),
+    );
+
+    expect(states.at(-1)).toBe('failed');
+    expect(peer.connectionState).toBe('failed');
+    peer.close();
+  });
+
+  it('reports failure when a remote description cannot be applied', async () => {
+    const { connection, transport, peer } = createPeer();
+    connection.setRemoteDescription = () => Promise.reject(new Error('bad sdp'));
+
+    transport.receive({ type: 'offer', payload: { sdp: 'v=0 broken' } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(peer.connectionState).toBe('failed');
+    peer.close();
+  });
+
+  it('closes data channels and clears handlers exactly once', () => {
+    const { connection, peer } = createPeer({ polite: false });
+    const states: string[] = [];
+    peer.subscribe((event) => {
+      if (event.type === 'connection-state') states.push(event.state);
+    });
+
+    peer.close();
+    peer.close();
+
+    expect(connection.closed).toBe(true);
+    expect(connection.dataChannels.every((channel) => channel.readyState === 'closed')).toBe(true);
+    expect(connection.ontrack).toBeNull();
+    expect(states.filter((state) => state === 'closed')).toHaveLength(1);
+    expect(peer.connectionState).toBe('closed');
+  });
+
+  it('replays existing channels to late subscribers', () => {
+    const { connection, peer } = createPeer({ polite: false });
+    connection.dataChannels[0]?.open();
+    const seen: string[] = [];
+
+    peer.subscribe((event) => {
+      if (event.type === 'data-channel' || event.type === 'data-channel-open')
+        seen.push(event.type);
+    });
+
+    expect(seen).toContain('data-channel');
+    expect(seen).toContain('data-channel-open');
+    peer.close();
+  });
+
+  it('falls back to an unknown path when stats cannot be read', async () => {
+    const { connection, peer } = createPeer();
+    connection.getStats = () => Promise.reject(new Error('no stats'));
+    const paths: string[] = [];
+    peer.subscribe((event) => {
+      if (event.type === 'connection-path') paths.push(event.path);
+    });
+
+    connection.connectionState = 'connected';
+    connection.iceConnectionState = 'connected';
+    connection.onconnectionstatechange?.call(connection.asPeerConnection(), new Event('change'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(paths.at(-1)).toBe('unknown');
+    peer.close();
+  });
 });

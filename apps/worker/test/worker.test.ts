@@ -68,6 +68,77 @@ describe('/api/rooms/:roomId/*', () => {
   });
 });
 
+describe('/api/rooms/:roomId/helper/ws', () => {
+  const productionEnv = { ...env, ENVIRONMENT: 'production' } as Cloudflare.Env;
+
+  it('validates the room id and requires a WebSocket upgrade before reaching the room', async () => {
+    const invalid = await app.request('/api/rooms/1/helper/ws', {}, productionEnv);
+    expect(invalid.status).toBe(400);
+
+    const plain = await app.request(`/api/rooms/${createRoomId()}/helper/ws`, {}, productionEnv);
+    expect(plain.status).toBe(426);
+    expect(apiErrorSchema.parse(await plain.json()).error).toBe('websocket_required');
+  });
+
+  it('rejects missing, malformed and unknown bearer tokens without revealing why', async () => {
+    const roomId = createRoomId();
+    const attempt = (headers: Record<string, string>) =>
+      app.request(
+        `/api/rooms/${roomId}/helper/ws`,
+        { headers: { Upgrade: 'websocket', ...headers } },
+        productionEnv,
+      );
+
+    expect((await attempt({})).status).toBe(401);
+    expect((await attempt({ Authorization: 'Bearer short' })).status).toBe(401);
+    expect((await attempt({ Authorization: `Basic ${'a'.repeat(43)}` })).status).toBe(401);
+    expect((await attempt({ Authorization: `Bearer ${'a'.repeat(43)}` })).status).toBe(401);
+  });
+
+  it('does not accept a helper token minted for a different room', async () => {
+    const roomA = createRoomId();
+    const roomB = createRoomId();
+    const response = await app.request(
+      `/api/rooms/${roomA}/ws`,
+      { headers: { Upgrade: 'websocket' } },
+      { ...env, ENVIRONMENT: 'development' },
+    );
+    const owner = (response as Response & { webSocket: WebSocket }).webSocket;
+    owner.accept();
+    const messages: { type: string; payload?: { token?: string } }[] = [];
+    owner.addEventListener('message', (event) => {
+      messages.push(JSON.parse(String(event.data)) as (typeof messages)[number]);
+    });
+    owner.send(
+      JSON.stringify({
+        type: 'join',
+        payload: { roomId: roomA, protocolVersion: PROTOCOL_VERSION },
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(messages.some((m) => m.type === 'joined')).toBe(true);
+    });
+    owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    await vi.waitFor(() => {
+      expect(messages.some((m) => m.type === 'helper-pairing-created')).toBe(true);
+    });
+    const token = messages.find((m) => m.type === 'helper-pairing-created')?.payload?.token;
+
+    const crossRoom = await app.request(
+      `/api/rooms/${roomB}/helper/ws`,
+      { headers: { Upgrade: 'websocket', Authorization: `Bearer ${String(token)}` } },
+      productionEnv,
+    );
+    expect(crossRoom.status).toBe(401);
+    owner.close();
+  });
+
+  it('forwards non-signaling room requests that are not WebSocket upgrades', async () => {
+    const response = await app.request(`/api/rooms/${createRoomId()}/anything`, {}, productionEnv);
+    expect(response.status).toBe(426);
+  });
+});
+
 describe('CallRoom WebSocket signaling', () => {
   async function connect(
     roomId: string,
@@ -445,6 +516,71 @@ describe('CallRoom WebSocket signaling', () => {
     helper.close(1000, 'done');
     owner.close();
     peer.close();
+  });
+
+  it('refuses a direct non-WebSocket request at the room object', async () => {
+    const stub = env.CALL_ROOM.get(env.CALL_ROOM.idFromName(createRoomId()));
+
+    const response = await stub.fetch('https://room.test/api/rooms/x/ws');
+    expect(response.status).toBe(426);
+
+    const helper = await stub.fetch('https://room.test/api/rooms/x/helper/ws');
+    expect(helper.status).toBe(426);
+  });
+
+  it('closes participants that send binary frames, oversized frames or a second join', async () => {
+    const roomId = createRoomId();
+    const binary = await connect(roomId);
+    const binaryClosed = new Promise<number>((resolve) => {
+      binary.addEventListener('close', (event) => {
+        resolve(event.code);
+      });
+    });
+    binary.send(new Uint8Array([1, 2, 3]));
+    expect(await binaryClosed).toBe(1009);
+
+    const oversized = await connect(createRoomId());
+    const oversizedClosed = new Promise<number>((resolve) => {
+      oversized.addEventListener('close', (event) => {
+        resolve(event.code);
+      });
+    });
+    oversized.send('x'.repeat(128 * 1024 + 1));
+    expect(await oversizedClosed).toBe(1009);
+
+    const repeat = await connect(roomId);
+    const joined = nextMessage(repeat);
+    join(repeat, roomId);
+    await joined;
+    await nextMessage(repeat);
+    const closed = new Promise<number>((resolve) => {
+      repeat.addEventListener('close', (event) => {
+        resolve(event.code);
+      });
+    });
+    join(repeat, roomId);
+    expect(await closed).toBe(1008);
+  });
+
+  it('tells the remaining participant when its peer leaves explicitly', async () => {
+    const roomId = createRoomId();
+    const first = await connect(roomId);
+    const firstJoined = nextMessage(first);
+    join(first, roomId);
+    await firstJoined;
+    await nextMessage(first);
+    const second = await connect(roomId);
+    const secondJoined = nextMessage(second);
+    join(second, roomId);
+    await secondJoined;
+
+    const peerLeft = nextMessage(first, 'peer-left');
+    second.send(JSON.stringify({ type: 'leave', payload: {} }));
+    // The first participant may see peer-joined before peer-left.
+    let message = await peerLeft;
+    if (message.type === 'peer-joined') message = await nextMessage(first, 'peer-left');
+    expect(message.type).toBe('peer-left');
+    first.close();
   });
 
   it('refuses malformed helper messages and helper attempts to inject participant traffic', async () => {
