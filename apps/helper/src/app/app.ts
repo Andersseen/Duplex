@@ -44,9 +44,9 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
 @Component({
   selector: 'dx-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'shell', '(window:focus)': 'refreshNative()' },
+  host: { '(window:focus)': 'refreshNative()' },
   styles: `
-    .shell {
+    :host {
       display: flex;
       min-height: 100dvh;
       flex-direction: column;
@@ -57,31 +57,60 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
       max-width: 38rem;
       margin: auto;
     }
+    header {
+      display: flex;
+      flex-direction: column;
+      gap: 0.125rem;
+    }
     h1 {
       margin: 0;
-      font-size: 2rem;
+      font-size: 1.75rem;
       letter-spacing: -0.02em;
     }
     h2 {
       margin: 0;
-      font-size: 1rem;
+      font-size: 0.95rem;
     }
     p {
       margin: 0;
-      opacity: 0.75;
+      color: var(--dx-muted);
     }
     .status {
-      margin-top: 0.5rem;
-      opacity: 1;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.25rem;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid var(--dx-line);
+      border-radius: 999px;
+      color: var(--dx-ink);
       font-weight: 500;
+    }
+    .status::before {
+      content: '';
+      width: 0.5rem;
+      height: 0.5rem;
+      flex: none;
+      border-radius: 50%;
+      background: var(--dx-muted);
+    }
+    .status[data-status='connected']::before {
+      background: var(--dx-ok);
+    }
+    .status[data-status='authorized']::before {
+      background: var(--dx-warn);
+    }
+    .status[data-status='error']::before {
+      background: var(--dx-danger);
     }
     section {
       display: flex;
       flex-direction: column;
       gap: 0.5rem;
       padding: 0.75rem 1rem;
-      border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+      border: 1px solid var(--dx-line);
       border-radius: 0.75rem;
+      background: var(--dx-surface);
     }
     .row {
       display: flex;
@@ -92,9 +121,18 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
     .badge {
       font-weight: 600;
     }
+    label {
+      font-size: 0.9rem;
+    }
     textarea {
       min-height: 7rem;
       resize: vertical;
+      padding: 0.5rem;
+      border: 1px solid var(--dx-line);
+      border-radius: 0.5rem;
+      background: transparent;
+      color: inherit;
+      font: inherit;
     }
     fieldset {
       display: flex;
@@ -104,11 +142,41 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
       padding: 0;
       border: 0;
     }
+    button {
+      min-height: 2.25rem;
+      padding: 0.375rem 1rem;
+      border: 1px solid var(--dx-line);
+      border-radius: 999px;
+      background: var(--dx-surface);
+      color: inherit;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+    button.primary {
+      border-color: transparent;
+      background: var(--dx-ink);
+      color: var(--dx-surface);
+    }
+    button.danger {
+      border-color: transparent;
+      background: var(--dx-danger-bg);
+      color: #fff;
+    }
+    :focus-visible {
+      outline: 2px solid var(--dx-accent);
+      outline-offset: 2px;
+    }
   `,
   template: `
-    <h1>Duplex</h1>
-    <p>Remote Control Helper</p>
-    <p class="status" role="status">{{ statusLabel() }}</p>
+    <header>
+      <h1>Duplex</h1>
+      <p>Remote Control Helper</p>
+    </header>
+    <p class="status" role="status" [attr.data-status]="status()">{{ statusLabel() }}</p>
     @if (status() === 'not-connected' || status() === 'error') {
       <label for="pairing-code">Paste pairing code</label>
       <textarea
@@ -122,7 +190,9 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
       @if (error()) {
         <p role="alert">{{ error() }}</p>
       }
-      <button type="button" [disabled]="!pairingCode().trim()" (click)="connect()">Connect</button>
+      <button type="button" class="primary" [disabled]="!pairingCode().trim()" (click)="connect()">
+        Connect
+      </button>
     }
     @if (native(); as state) {
       <section aria-label="Native pointer control">
@@ -180,7 +250,7 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
           <h2>Peer may control this Mac</h2>
           <p>{{ sessionScopes() }}</p>
           <p>Expires in {{ expiryLabel() }}</p>
-          <button type="button" (click)="stopControl()">Stop control</button>
+          <button type="button" class="danger" (click)="stopControl()">Stop control</button>
         </section>
       }
       <button type="button" (click)="disconnect()">Disconnect</button>
