@@ -6,13 +6,15 @@ import {
   protocolErrorMessageSchema,
   roomFullMessageSchema,
   serverSignalingMessageSchema,
-  helperBridgeMessageSchema,
+  helperOutboundMessageSchema,
 } from '@duplex/protocol';
 import type { ServerSignalingMessage } from '@duplex/protocol';
 import { z } from 'zod';
 import { generateRtcConfiguration } from './rtc-config';
 
 const MAX_MESSAGE_BYTES = 128 * 1024;
+/** A validated pointer input envelope is a few hundred bytes; reject anything padded beyond that. */
+const MAX_HELPER_INPUT_BYTES = 1024;
 const participantAttachmentSchema = z
   .object({
     kind: z.literal('participant'),
@@ -121,9 +123,22 @@ export class CallRoom extends DurableObject {
         socket.close(1008, 'Invalid helper message');
         return;
       }
-      const helperMessage = helperBridgeMessageSchema.safeParse(helperRaw);
-      if (!helperMessage.success || helperMessage.data.type !== 'helper-ready')
+      const helperMessage = helperOutboundMessageSchema.safeParse(helperRaw);
+      if (!helperMessage.success) {
         socket.close(1008, 'Invalid helper message');
+        return;
+      }
+      // A helper may only talk to the participant that paired it, and only with safe control-plane state.
+      if (helperMessage.data.type === 'helper-capabilities')
+        this.sendToParticipant(current.ownerParticipantId, {
+          type: 'helper-capabilities',
+          payload: { availableScopes: helperMessage.data.availableScopes },
+        });
+      else if (helperMessage.data.type === 'helper-stop-control')
+        this.sendToParticipant(current.ownerParticipantId, {
+          type: 'helper-stop-control',
+          payload: { controlSessionId: helperMessage.data.controlSessionId },
+        });
       return;
     }
     const size =
@@ -252,19 +267,48 @@ export class CallRoom extends DurableObject {
     }
     if (message.type === 'helper-session-authorized' || message.type === 'helper-session-revoked') {
       if (!current.helperPaired) return;
-      for (const helperSocket of this.ctx.getWebSockets()) {
-        const helper = attachment(helperSocket);
-        if (
-          helper?.kind === 'helper' &&
-          helper.ownerParticipantId === current.participantId &&
-          helperSocket.readyState === WebSocket.OPEN
-        )
-          helperSocket.send(JSON.stringify(message));
+      this.sendToOwnerHelper(current.participantId, message);
+      return;
+    }
+    if (message.type === 'helper-input') {
+      if (size > MAX_HELPER_INPUT_BYTES) {
+        sendProtocolError(socket, 'invalid_message', 'Input message is too large.');
+        socket.close(1009, 'Input too large');
+        return;
       }
+      // Never logged and never relayed to the peer browser: it only reaches this participant's helper.
+      if (current.helperPaired) this.sendToOwnerHelper(current.participantId, message);
       return;
     }
     for (const peer of this.participants()) {
       if (peer !== socket) send(peer, message);
+    }
+  }
+
+  private sendToOwnerHelper(
+    ownerParticipantId: string,
+    message: Extract<
+      z.infer<typeof clientSignalingMessageSchema>,
+      { type: 'helper-session-authorized' | 'helper-session-revoked' | 'helper-input' }
+    >,
+  ): void {
+    const payload = JSON.stringify(message);
+    for (const helperSocket of this.ctx.getWebSockets()) {
+      const helper = attachment(helperSocket);
+      if (
+        helper?.kind === 'helper' &&
+        helper.ownerParticipantId === ownerParticipantId &&
+        helperSocket.readyState === WebSocket.OPEN
+      )
+        helperSocket.send(payload);
+    }
+  }
+
+  private sendToParticipant(participantId: string, message: ServerSignalingMessage): void {
+    for (const socket of this.participants()) {
+      const value = attachment(socket);
+      if (value?.kind === 'participant' && value.participantId === participantId)
+        send(socket, message);
     }
   }
 

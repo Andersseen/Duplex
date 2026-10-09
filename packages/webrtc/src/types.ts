@@ -12,6 +12,8 @@ export const DATA_CHANNEL_LABELS = {
   pointer: 'duplex-pointer',
   /** Control negotiation relayed peer to peer once remote control exists. */
   control: 'duplex-control',
+  /** Reliable, ordered native pointer input; carries nothing else. */
+  input: 'duplex-input',
 } as const;
 
 export type DataChannelLabel = (typeof DATA_CHANNEL_LABELS)[keyof typeof DATA_CHANNEL_LABELS];

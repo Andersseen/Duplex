@@ -1,7 +1,17 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Minimal capability for the main window. No plugins or native commands are exposed.",
+  "description": "Main window only: Tauri core defaults plus the specific Duplex helper commands. No shell, filesystem, process or global Tauri access.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "allow-connect-helper",
+    "allow-disconnect-helper",
+    "allow-get-native-input-status",
+    "allow-list-displays",
+    "allow-select-display",
+    "allow-request-accessibility",
+    "allow-refresh-accessibility-status",
+    "allow-stop-control"
+  ]
 }

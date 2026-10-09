@@ -1,7 +1,7 @@
 [package]
 name = "duplex-helper"
 version = "0.0.0"
-description = "Duplex native helper: temporary control-session bridge; native input is not implemented."
+description = "Duplex native helper: temporary control-session bridge with macOS pointer control."
 edition = "2021"
 rust-version = "1.77"
 publish = false
@@ -22,3 +22,10 @@ serde_json = "1"
 tokio-tungstenite = { version = "0.28", features = ["native-tls"] }
 tokio = { version = "1", features = ["macros", "sync", "rt", "time"] }
 url = "2"
+
+# Narrow, maintained objc2 bindings (already part of Tauri's macOS dependency tree).
+# Only the CoreGraphics event/display APIs and the Accessibility trust check are enabled.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes", "CFDictionary", "CFNumber", "CFString"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGDirectDisplay", "CGError", "CGEvent", "CGEventTypes"] }
+objc2-application-services = { version = "0.3", default-features = false, features = ["std", "HIServices", "AXUIElement"] }

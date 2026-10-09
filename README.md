@@ -4,7 +4,7 @@ Duplex is a lightweight way to start a private 1:1 browser call. Create a room l
 
 ## Status
 
-**Duplex supports 1:1 browser calls, screen sharing, peer-to-peer file transfer, live screen collaboration, and temporary Assist permission negotiation.** A participant explicitly joins before the browser requests microphone access. Camera access is opt-in after joining. Signaling travels through the Worker and a room Durable Object. WebRTC prefers a direct connection and uses Cloudflare Realtime TURN as a relay when NAT or firewall rules block direct connectivity.
+**Duplex supports 1:1 browser calls, screen sharing, peer-to-peer file transfer, live screen collaboration, and temporary Assist sessions with native macOS pointer control.** A participant explicitly joins before the browser requests microphone access. Camera access is opt-in after joining. Signaling travels through the Worker and a room Durable Object. WebRTC prefers a direct connection and uses Cloudflare Realtime TURN as a relay when NAT or firewall rules block direct connectivity.
 
 | Area                        | State                                                                            |
 | --------------------------- | -------------------------------------------------------------------------------- |
@@ -17,10 +17,38 @@ Duplex is a lightweight way to start a private 1:1 browser call. Create a room l
 | File transfer               | Explicit receiver consent, progress, cancellation, and browser download          |
 | Screen collaboration        | Peer pointer, laser pointer, and shared-screen annotations                       |
 | Assist                      | Explicit request/allow/reject, scoped temporary sessions tied to a screen ID     |
+| Native pointer control      | macOS only: move, left/right click, drag, scroll through the paired helper       |
 | Native helper pairing       | One-use room and participant scoped credential over authenticated WebSocket      |
-| Helper (Tauri 2 + Angular)  | Rust-owned secure WebSocket and session status UI; no OS input execution         |
+| Helper (Tauri 2 + Angular)  | Rust-owned secure WebSocket, Accessibility and display setup, pointer execution  |
 
-Native OS mouse and keyboard execution is **not implemented yet**. Assist currently negotiates permission only. Clipboard sync, recording, chat, multi-user calls, and accounts are also unsupported.
+| Platform | Native pointer control | Native keyboard control |
+| -------- | ---------------------- | ----------------------- |
+| macOS    | **Supported**          | Not yet                 |
+| Windows  | Not yet                | Not yet                 |
+| Linux    | Not yet                | Not yet                 |
+
+On Windows and Linux the helper still pairs and the permission protocol still works, but it never advertises a native capability, so a peer cannot request control. Keyboard control, clipboard sync, recording, chat, multi-user calls, and accounts are unsupported. There is **no unattended access**: no background startup, saved room credentials, persistent pairing, "always allow", or trusted contacts. Every session is user-present and explicitly authorized.
+
+### Native pointer control (macOS)
+
+Pointer control needs all of the following at once:
+
+- the sharer shares an **entire monitor** (the browser must report `displaySurface === 'monitor'`; tab, window, or unknown sources never qualify);
+- a paired Duplex Helper;
+- local **Accessibility** permission, granted by the user from the helper's _Enable Accessibility_ button (the helper never prompts on launch or pairing);
+- an explicit **target display** chosen in the helper (a lone display is selected automatically; with several, nothing is advertised until the user picks one);
+- an explicit, temporary control grant (**Allow**) from the sharer.
+
+The helper reports only the scopes it can execute right now (`availableScopes`, currently `['pointer']` or `[]`) — never display IDs, names, or sizes. The controller can only request an advertised scope, and the controlled browser never grants one its helper cannot execute. Losing Accessibility, losing the selected display, changing the target display, expiry, the helper's own **Stop control** button, or a disconnect ends the session and releases any held mouse button.
+
+```text
+Controller browser ─ duplex-input (reliable, ordered) ─▶ Controlled browser ─ room WebSocket ─▶ CallRoom ─▶ paired helper ─▶ Quartz
+   normalized x/y, RAF-coalesced           validates session, surface, scope       owner-only route         re-validates every event
+```
+
+Input is normalized (`0..1`) until the final mapping to the selected display's native bounds, so negative origins, mixed resolutions, and Retina scaling need no special handling. Pointer motion is coalesced to one update per animation frame and dropped when the DataChannel backs up; button and scroll events are never dropped for backpressure. The helper authorizes every event itself (session, surface, scope, expiry, sequence, rate limit, Accessibility, display) before calling Quartz, and keeps the latest move plus a small bounded action queue so a flood cannot grow memory.
+
+The helper asks only for Accessibility. It needs no Input Monitoring, Screen Recording, microphone, or camera permission, because the browser owns screen capture and the helper only posts pointer events.
 
 Helper pairing and control permission are separate. Pairing identifies the local native helper; it does not grant the peer permission. A control session requires a peer request, the screen sharer's explicit **Allow**, an active matching shared-screen surface, and a temporary scoped grant that expires automatically. Either participant can stop or release it. Each helper pairing code is a two-minute, one-use secret; only its SHA-256 hash is retained in the Durable Object attachment. The helper connects over secure WebSocket and receives session metadata only after browser consent.
 
@@ -65,7 +93,7 @@ Boundaries: `protocol` has no framework dependency; `webrtc` owns peer negotiati
 
 ## Local development
 
-Prerequisites: Node `>=22.22.3` (see `.nvmrc`) and pnpm 10 (`corepack enable`). Rust and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) are only needed for the dormant helper.
+Prerequisites: Node `>=22.22.3` (see `.nvmrc`) and pnpm 10 (`corepack enable`). Rust and the [Tauri system prerequisites](https://v2.tauri.app/start/prerequisites/) are only needed for the native helper.
 
 ```bash
 pnpm install
@@ -98,12 +126,32 @@ pnpm --filter @duplex/helper build
 pnpm rust:fmt:check
 pnpm rust:check
 pnpm rust:clippy
+cargo test --manifest-path apps/helper/src-tauri/Cargo.toml --locked
 pnpm e2e
 ```
 
-The Playwright E2E suite starts the real local Analog app, Worker, and Durable Object. It uses Chromium's fake microphone and camera. The Assist E2E opens an authenticated test helper WebSocket, then exercises request, allow, authorization, revoke, and token replay rejection. Normal E2E requires no Cloudflare credentials. For a real relay check, configure local TURN secrets and run `pnpm e2e:turn`.
+The Playwright E2E suite starts the real local Analog app, Worker, and Durable Object. It uses Chromium's fake microphone and camera. The Assist E2E opens an authenticated test helper WebSocket, announces pointer capability, then exercises request, allow, authorization, normalized move/click/drag/scroll relay, rejection of stale-session, wrong-surface, keyboard-like and out-of-range input, revoke, a fresh surface, and token replay rejection. It never posts real operating-system input. Normal E2E requires no Cloudflare credentials. For a real relay check, configure local TURN secrets and run `pnpm e2e:turn`.
+
+CI also compiles, lints, and tests the helper on `macos-latest` so the Quartz and Accessibility bindings are checked. Those tests never post input or move the runner's mouse.
 
 `pnpm format` rewrites files with Prettier.
+
+### Manual macOS verification
+
+Automated tests cannot prove real OS input. To check it by hand on a Mac with two browsers (or two machines):
+
+```bash
+pnpm dev            # web + worker
+pnpm dev:helper     # native helper
+```
+
+1. Join the room in browser A, share an **entire screen**, and create a pairing code; paste it into the helper.
+2. In the helper click **Enable Accessibility**, approve the helper (in `tauri dev` this is the dev binary) in System Settings, then **Re-check**. Pick the display you are sharing if you have several.
+3. In browser B (second browser or machine) click **Request control**, then **Allow** in browser A.
+4. From B move, click, right-click, drag, and scroll over the shared screen; A's real cursor should follow.
+5. Click **Stop control** in the helper and confirm the cursor stops responding immediately and no button stays held.
+
+This flow was not executed as part of the automated change; scroll direction in particular should be confirmed on hardware.
 
 ## UI ecosystem note
 

@@ -2,7 +2,7 @@
   "name": "@duplex/helper",
   "version": "0.0.0",
   "private": true,
-  "description": "Duplex native helper (Tauri 2 + Angular): temporary control-session bridge; native input is not implemented.",
+  "description": "Duplex native helper (Tauri 2 + Angular): temporary control-session bridge with native macOS pointer control.",
   "scripts": {
     "dev": "ng serve",
     "build": "ng build",

@@ -56,6 +56,31 @@ jobs:
       - run: pnpm rust:clippy
       - run: cargo test --manifest-path apps/helper/src-tauri/Cargo.toml --locked
 
+  rust-macos:
+    name: Rust (macOS helper)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/helper/src-tauri
+      - run: pnpm install --frozen-lockfile
+      # tauri-build validates frontendDist, so the helper's Angular build must exist first.
+      - run: pnpm --filter @duplex/helper build
+      # Compiles the macOS-only Quartz/Accessibility code that the Linux job cfg's out. The tests
+      # are read-only; nothing here posts input or moves the runner's mouse.
+      - run: pnpm rust:check
+      - run: pnpm rust:clippy
+      - run: cargo test --manifest-path apps/helper/src-tauri/Cargo.toml --locked
+
   browser-e2e:
     name: Browser E2E (Chromium)
     runs-on: ubuntu-latest

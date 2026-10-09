@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { roomIdSchema } from './room';
 import { helperSessionMetadataSchema } from './helper';
+import { controlRevocationReasonSchema, controlScopeSchema } from './control';
+import { inputMessageSchema } from './input';
 
 const SDP_LIMIT = 64 * 1024;
 
@@ -37,15 +39,12 @@ export const helperSessionRevokedMessageSchema = z
   .object({
     type: z.literal('helper-session-revoked'),
     controlSessionId: z.uuid(),
-    reason: z.enum([
-      'user',
-      'expired',
-      'disconnected',
-      'surface-ended',
-      'helper-disconnected',
-      'superseded',
-    ]),
+    reason: controlRevocationReasonSchema,
   })
+  .strict();
+/** A participant relays validated pointer input to its own paired helper only. */
+export const helperInputMessageSchema = z
+  .object({ type: z.literal('helper-input'), input: inputMessageSchema })
   .strict();
 
 export const offerMessageSchema = z
@@ -89,6 +88,7 @@ export const clientSignalingMessageSchema = z.discriminatedUnion('type', [
   helperPairingCreateMessageSchema,
   helperSessionAuthorizedMessageSchema,
   helperSessionRevokedMessageSchema,
+  helperInputMessageSchema,
   offerMessageSchema,
   answerMessageSchema,
   iceCandidateMessageSchema,
@@ -183,6 +183,26 @@ export const helperDisconnectedMessageSchema = z
   })
   .strict();
 
+export const helperCapabilitiesMessageSchema = z
+  .object({
+    type: z.literal('helper-capabilities'),
+    payload: z
+      .object({
+        availableScopes: z
+          .array(controlScopeSchema)
+          .max(2)
+          .refine((values) => new Set(values).size === values.length),
+      })
+      .strict(),
+  })
+  .strict();
+export const helperStopControlMessageSchema = z
+  .object({
+    type: z.literal('helper-stop-control'),
+    payload: z.object({ controlSessionId: z.uuid() }).strict(),
+  })
+  .strict();
+
 export const serverRoomMessageSchema = z.discriminatedUnion('type', [
   joinedMessageSchema,
   peerJoinedMessageSchema,
@@ -193,6 +213,8 @@ export const serverRoomMessageSchema = z.discriminatedUnion('type', [
   helperPairingCreatedMessageSchema,
   helperPairedMessageSchema,
   helperDisconnectedMessageSchema,
+  helperCapabilitiesMessageSchema,
+  helperStopControlMessageSchema,
 ]);
 
 export const serverSignalingMessageSchema = z.union([

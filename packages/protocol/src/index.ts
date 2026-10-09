@@ -3,6 +3,7 @@ export * from './collaboration';
 export * from './file-transfer';
 export * from './http';
 export * from './helper';
+export * from './input';
 export * from './message';
 export * from './room';
 export * from './signaling';
