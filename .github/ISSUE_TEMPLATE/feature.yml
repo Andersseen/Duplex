@@ -1,0 +1,29 @@
+name: Feature request
+description: Suggest an improvement. Large changes are best discussed before any code is written.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that Duplex does not support well?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Proposed outcome
+      description: What should be possible afterwards? Describe behavior, not implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and privacy implications
+      description: Does this expose new data, widen what a peer can do, or touch pairing, consent or the native helper?
+    validations:
+      required: true
