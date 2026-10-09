@@ -2,7 +2,7 @@
  * Wire protocol version. Bump on any breaking change to a message schema so that
  * a peer running an older client can be rejected explicitly instead of misparsing.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** File-transfer control messages sent over the peer DataChannel. */
 export const FILE_TRANSFER_PROTOCOL_VERSION = 1;

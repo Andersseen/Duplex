@@ -14,6 +14,7 @@ import { roomIdSchema } from '@duplex/protocol';
 import { CallSessionService } from '../services/call-session.service';
 import { clientToNormalized, containedVideoRect } from '../collaboration/screen-geometry';
 import type { NormalizedPoint } from '../services/collaboration.service';
+import { normalizeWheelDelta } from '../services/remote-input.service';
 
 @Component({
   selector: 'dx-room-page',
@@ -98,7 +99,11 @@ import type { NormalizedPoint } from '../services/collaboration.service';
               (pointermove)="onSurfacePointerMove($event)"
               (pointerup)="onSurfacePointerUp($event)"
               (pointercancel)="onSurfacePointerUp($event)"
+              (lostpointercapture)="onSurfacePointerUp($event)"
               (pointerleave)="onSurfacePointerLeave()"
+              (contextmenu)="onSurfaceContextMenu($event)"
+              (wheel)="onSurfaceWheel($event)"
+              [class.cursor-crosshair]="session.remoteInput.capturing()"
             >
               <g [attr.transform]="overlayTransform()">
                 @for (stroke of session.collaboration.strokes(); track stroke.id) {
@@ -273,6 +278,7 @@ import type { NormalizedPoint } from '../services/collaboration.service';
                 [attr.aria-pressed]="session.collaboration.tool() === tool.id"
                 [disabled]="
                   tool.disabled ||
+                  session.remoteInput.capturing() ||
                   ((tool.id === 'pointer' || tool.id === 'laser') &&
                     !session.collaboration.pointerChannelOpen()) ||
                   (tool.id === 'draw' && !session.collaboration.collaborationChannelOpen())
@@ -302,6 +308,14 @@ import type { NormalizedPoint } from '../services/collaboration.service';
               <p role="status" class="mt-2 text-sm text-emerald-700 dark:text-emerald-300">
                 Helper connected
               </p>
+              @if (session.control.localAvailableScopes().includes('pointer')) {
+                <p class="mt-1 text-sm">Pointer control is ready. Keyboard is not available yet.</p>
+              } @else {
+                <p class="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+                  Pointer control is not ready. Share an entire screen, then enable Accessibility
+                  and choose a display in Duplex Helper (macOS only).
+                </p>
+              }
             } @else if (session.helperPairingCode()) {
               <p class="mt-2 text-sm">Pairing code ready. It expires in 2 minutes.</p>
               <textarea
@@ -347,7 +361,11 @@ import type { NormalizedPoint } from '../services/collaboration.service';
                 {{ session.control.remainingSeconds() }} seconds
               </p>
               <p class="mt-1 text-xs text-zinc-500">
-                Input execution will be enabled in the next Assist milestone.
+                {{
+                  controlSession.role === 'controller'
+                    ? 'Pointer control is live: move, click, drag and scroll over the shared screen.'
+                    : 'Your peer can move and click your mouse. Keyboard control is not available.'
+                }}
               </p>
               <button
                 type="button"
@@ -380,7 +398,7 @@ import type { NormalizedPoint } from '../services/collaboration.service';
               </div>
             } @else if (session.control.canRequest()) {
               <p class="font-medium">Assist is available for this shared screen.</p>
-              <p class="mt-1 text-sm">Pointer ✓ · Keyboard ✓</p>
+              <p class="mt-1 text-sm">Pointer ✓ · Keyboard — not available yet</p>
               <button
                 type="button"
                 class="mt-2 rounded-full border px-4 py-2 disabled:opacity-50"
@@ -562,9 +580,14 @@ export default class RoomPage implements OnDestroy {
   } | null = null;
   private pointerFrame: number | null = null;
   private drawing = false;
+  private controlButton: { pointerId: number; button: 'left' | 'right' } | null = null;
   protected readonly Math = Math;
 
   constructor() {
+    effect(() => {
+      // Once input capture ends (revoke, expiry, surface change) forget any held-button bookkeeping.
+      if (!this.session.remoteInput.capturing()) this.controlButton = null;
+    });
     effect(() => {
       this.session.collaboration.surfaceRevision();
       this.cancelPendingPointer();
@@ -631,6 +654,10 @@ export default class RoomPage implements OnDestroy {
   }
 
   protected onSurfacePointerDown(event: PointerEvent): void {
+    if (this.session.remoteInput.capturing()) {
+      this.controlPointerDown(event);
+      return;
+    }
     if (this.session.collaboration.tool() !== 'draw') return;
     const point = this.normalizedPoint(event);
     if (!point) return;
@@ -641,6 +668,12 @@ export default class RoomPage implements OnDestroy {
   }
 
   protected onSurfacePointerMove(event: PointerEvent): void {
+    if (this.session.remoteInput.capturing()) {
+      // While a button is held the pointer is captured, so edge overshoot pins to the edge.
+      const point = this.normalizedPoint(event, this.controlButton !== null);
+      if (point) this.session.remoteInput.movePointer(point);
+      return;
+    }
     const point = this.normalizedPoint(event);
     if (!point) {
       if (!this.drawing) this.sendPointerHideSoon();
@@ -663,6 +696,16 @@ export default class RoomPage implements OnDestroy {
   }
 
   protected onSurfacePointerUp(event: PointerEvent): void {
+    const held = this.controlButton;
+    if (held?.pointerId === event.pointerId) {
+      this.controlButton = null;
+      const target = event.currentTarget as SVGSVGElement;
+      const point = this.normalizedPoint(event, true) ?? this.session.remoteInput.lastPointer();
+      // Always release: a lost capture, cancel or revoke must never leave the remote button down.
+      this.session.remoteInput.pointerButton(held.button, 'up', point);
+      if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
+      return;
+    }
     if (!this.drawing) return;
     this.drawing = false;
     if ((event.currentTarget as SVGSVGElement).hasPointerCapture(event.pointerId))
@@ -671,11 +714,36 @@ export default class RoomPage implements OnDestroy {
   }
 
   protected onSurfacePointerLeave(): void {
+    if (this.session.remoteInput.capturing()) return;
     if (this.drawing) {
       this.drawing = false;
       this.session.collaboration.finishStroke();
     }
     this.sendPointerHideSoon();
+  }
+
+  protected onSurfaceContextMenu(event: Event): void {
+    // Only swallow the browser menu while this surface is consuming right clicks as remote input.
+    if (this.session.remoteInput.capturing()) event.preventDefault();
+  }
+
+  protected onSurfaceWheel(event: WheelEvent): void {
+    if (!this.session.remoteInput.capturing() || !this.normalizedPoint(event)) return;
+    event.preventDefault();
+    const { deltaX, deltaY } = normalizeWheelDelta(event.deltaX, event.deltaY, event.deltaMode);
+    this.session.remoteInput.scroll(deltaX, deltaY);
+  }
+
+  private controlPointerDown(event: PointerEvent): void {
+    if (event.pointerType === 'touch' || this.controlButton) return;
+    const button = event.button === 0 ? 'left' : event.button === 2 ? 'right' : null;
+    if (!button) return;
+    const point = this.normalizedPoint(event);
+    if (!point) return;
+    event.preventDefault();
+    (event.currentTarget as SVGSVGElement).setPointerCapture(event.pointerId);
+    this.controlButton = { pointerId: event.pointerId, button };
+    this.session.remoteInput.pointerButton(button, 'down', point);
   }
 
   private readonly measureOverlay = (): void => {
@@ -712,7 +780,7 @@ export default class RoomPage implements OnDestroy {
     return null;
   }
 
-  private normalizedPoint(event: PointerEvent): NormalizedPoint | null {
+  private normalizedPoint(event: MouseEvent, clamp = false): NormalizedPoint | null {
     const video = this.activeVideoElement();
     if (!video) return null;
     const rect = video.getBoundingClientRect();
@@ -722,6 +790,7 @@ export default class RoomPage implements OnDestroy {
       rect,
       video.videoWidth,
       video.videoHeight,
+      clamp,
     );
   }
 

@@ -70,4 +70,13 @@ describe('screen geometry', () => {
     });
     expect(containedVideoRect(0, 600, 16, 9)).toBeNull();
   });
+
+  it('ignores points outside the video unless clamping a captured pointer', () => {
+    const element = { left: 0, top: 0, width: 800, height: 600 };
+    // 16:9 content is letterboxed to y 75..525.
+    expect(clientToNormalized(400, 40, element, 16, 9)).toBeNull();
+    expect(clientToNormalized(400, 40, element, 16, 9, true)).toEqual({ x: 0.5, y: 0 });
+    expect(clientToNormalized(-50, 900, element, 16, 9, true)).toEqual({ x: 0, y: 1 });
+    expect(clientToNormalized(400, 300, element, 16, 9, true)).toEqual({ x: 0.5, y: 0.5 });
+  });
 });

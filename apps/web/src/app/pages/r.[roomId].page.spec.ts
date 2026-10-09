@@ -25,6 +25,7 @@ vi.mock('@duplex/webrtc', () => ({
     collaboration: 'duplex-collaboration',
     pointer: 'duplex-pointer',
     control: 'duplex-control',
+    input: 'duplex-input',
   },
   toRtcIceServers: (
     iceServers: { urls: string | string[]; username?: string; credential?: string }[],

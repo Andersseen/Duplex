@@ -14,6 +14,7 @@ import type { DuplexDataChannel } from '@duplex/webrtc';
 import { FileTransferService } from './file-transfer.service';
 import { CollaborationService } from './collaboration.service';
 import { ControlService } from './control.service';
+import { RemoteInputService } from './remote-input.service';
 
 export type CallState =
   | 'ready'
@@ -46,6 +47,7 @@ export class CallSessionService implements OnDestroy {
   readonly fileTransfers = new FileTransferService();
   readonly collaboration = new CollaborationService();
   readonly control = new ControlService();
+  readonly remoteInput = new RemoteInputService(this.control);
   readonly helperPairingCode = signal<string | null>(null);
   readonly helperPairingExpiresAt = signal<number | null>(null);
   readonly helperConnected = signal(false);
@@ -70,8 +72,18 @@ export class CallSessionService implements OnDestroy {
   private peerPresent = false;
   private currentRoomId: string | null = null;
   private configuredApiOrigin: string | null = null;
+  private displaySurfaceIsMonitor = false;
 
   constructor() {
+    // Native control and collaboration overlays are mutually exclusive: a grant turns the tool off.
+    this.control.addSessionObserver((event, session) => {
+      if (event === 'started' && session.role === 'controller') this.collaboration.setTool('off');
+    });
+    this.remoteInput.setHelperRelay((input) => {
+      if (this.socket?.readyState !== WebSocket.OPEN || !this.helperConnected()) return false;
+      this.socket.send(JSON.stringify({ type: 'helper-input', input }));
+      return true;
+    });
     this.collaboration.setPeerMediaListener((source, surfaceId) => {
       this.control.setPeerMedia(source, surfaceId);
     });
@@ -252,6 +264,10 @@ export class CallSessionService implements OnDestroy {
     }
     this.displayStream = stream;
     this.displayTrack = track;
+    // Only an explicit `monitor` source qualifies for native control; unknown is never guessed.
+    this.displaySurfaceIsMonitor =
+      typeof track.getSettings === 'function' &&
+      (track.getSettings() as { displaySurface?: string }).displaySurface === 'monitor';
     track.onended = () => {
       void this.stopScreenSharing();
     };
@@ -274,6 +290,7 @@ export class CallSessionService implements OnDestroy {
     const track = this.displayTrack;
     this.displayTrack = null;
     this.displayStream = null;
+    this.displaySurfaceIsMonitor = false;
     this.screenSharing.set(false);
     this.collaboration.setLocalVideoSource(this.cameraEnabled() ? 'camera' : 'none');
     this.syncControlSurface();
@@ -312,7 +329,10 @@ export class CallSessionService implements OnDestroy {
   }
 
   private syncControlSurface(): void {
-    this.control.setLocalScreen(this.screenSharing() ? this.collaboration.localSurfaceId() : null);
+    this.control.setLocalScreen(
+      this.screenSharing() ? this.collaboration.localSurfaceId() : null,
+      this.screenSharing() && this.displaySurfaceIsMonitor,
+    );
   }
 
   leave(): void {
@@ -401,6 +421,16 @@ export class CallSessionService implements OnDestroy {
     } else if (message.type === 'helper-disconnected') {
       this.helperConnected.set(false);
       this.control.setHelperConnected(false);
+    } else if (message.type === 'helper-capabilities') {
+      this.control.setHelperScopes(message.payload.availableScopes);
+    } else if (message.type === 'helper-stop-control') {
+      // The local user stopped control from the helper: converge through the normal revoke path.
+      const active = this.control.session();
+      if (
+        active?.role === 'controlled' &&
+        active.controlSessionId === message.payload.controlSessionId
+      )
+        this.control.release();
     } else {
       this.transportListener?.(message);
     }
@@ -476,6 +506,8 @@ export class CallSessionService implements OnDestroy {
           this.fileChannelOpen.set(event.channel.state === 'open');
         } else if (event.channel.label === DATA_CHANNEL_LABELS.control) {
           this.control.attachChannel(event.channel);
+        } else if (event.channel.label === DATA_CHANNEL_LABELS.input) {
+          this.remoteInput.attachChannel(event.channel);
         } else {
           this.collaboration.attachChannel(event.channel);
         }
@@ -532,6 +564,7 @@ export class CallSessionService implements OnDestroy {
     this.dataChannelUnsubscribers.clear();
     this.fileChannelOpen.set(false);
     this.control.peerChanged();
+    this.remoteInput.peerChanged();
     this.fileTransfers.peerChanged();
     this.collaboration.peerChanged();
     this.peerUnsubscribe?.();
@@ -579,6 +612,7 @@ export class CallSessionService implements OnDestroy {
       this.cameraTrack = null;
       this.displayTrack = null;
       this.displayStream = null;
+      this.displaySurfaceIsMonitor = false;
       this.localVideoStream.set(null);
       this.cameraEnabled.set(false);
       this.screenSharing.set(false);

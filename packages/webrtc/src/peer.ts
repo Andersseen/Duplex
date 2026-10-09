@@ -58,7 +58,8 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
       raw.label !== DATA_CHANNEL_LABELS.fileTransfer &&
       raw.label !== DATA_CHANNEL_LABELS.collaboration &&
       raw.label !== DATA_CHANNEL_LABELS.pointer &&
-      raw.label !== DATA_CHANNEL_LABELS.control
+      raw.label !== DATA_CHANNEL_LABELS.control &&
+      raw.label !== DATA_CHANNEL_LABELS.input
     ) {
       raw.close();
       return;
@@ -110,6 +111,8 @@ export function createDuplexPeer(transport: SignalingTransport, options: PeerOpt
       }),
     );
     attachDataChannel(connection.createDataChannel(DATA_CHANNEL_LABELS.control, { ordered: true }));
+    // Button down/up, drag and scroll must neither be lost nor reordered; motion is coalesced above.
+    attachDataChannel(connection.createDataChannel(DATA_CHANNEL_LABELS.input, { ordered: true }));
   }
   connection.ondatachannel = (event) => {
     attachDataChannel(event.channel);

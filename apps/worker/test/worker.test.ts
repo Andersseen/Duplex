@@ -347,6 +347,155 @@ describe('CallRoom WebSocket signaling', () => {
     third.close();
   });
 
+  it('routes helper capability, stop and input traffic only between a participant and its own helper', async () => {
+    const roomId = createRoomId();
+    const owner = await connect(roomId);
+    const ownerJoined = nextMessage(owner);
+    join(owner, roomId);
+    await ownerJoined;
+    await nextMessage(owner);
+    const peer = await connect(roomId);
+    const peerJoined = nextMessage(peer);
+    const ownerPeerJoined = nextMessage(owner);
+    join(peer, roomId);
+    await Promise.all([peerJoined, ownerPeerJoined]);
+    await nextMessage(peer);
+
+    const created = nextMessage(owner, 'helper-pairing-created');
+    owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    const pairing = (await created) as { type: string; payload: { token: string } };
+    const paired = nextMessage(owner, 'helper-paired');
+    const response = await app.request(
+      `/api/rooms/${roomId}/helper/ws`,
+      { headers: { Upgrade: 'websocket', Authorization: `Bearer ${pairing.payload.token}` } },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    expect(response.status).toBe(101);
+    const helper = (response as Response & { webSocket: WebSocket }).webSocket;
+    helper.accept();
+    await paired;
+
+    const input = {
+      type: 'input-pointer-move',
+      protocolVersion: 1,
+      controlSessionId: crypto.randomUUID(),
+      surfaceId: crypto.randomUUID(),
+      sequence: 1,
+      x: 0.25,
+      y: 0.75,
+    };
+
+    // helper -> owner only; the peer never sees helper traffic.
+    const capabilities = nextMessage(owner, 'helper-capabilities');
+    const noPeerCapability = expectNoMessage(peer);
+    helper.send(JSON.stringify({ type: 'helper-capabilities', availableScopes: ['pointer'] }));
+    expect(await capabilities).toEqual({
+      type: 'helper-capabilities',
+      payload: { availableScopes: ['pointer'] },
+    });
+    await noPeerCapability;
+
+    const sessionId = crypto.randomUUID();
+    const stop = nextMessage(owner, 'helper-stop-control');
+    const noPeerStop = expectNoMessage(peer);
+    helper.send(JSON.stringify({ type: 'helper-stop-control', controlSessionId: sessionId }));
+    expect(await stop).toEqual({
+      type: 'helper-stop-control',
+      payload: { controlSessionId: sessionId },
+    });
+    await noPeerStop;
+
+    // owner -> its helper only; never to the peer browser.
+    const delivered = nextMessage(helper, 'helper-input');
+    const noPeerInput = expectNoMessage(peer);
+    owner.send(JSON.stringify({ type: 'helper-input', input }));
+    expect(await delivered).toEqual({ type: 'helper-input', input });
+    await noPeerInput;
+
+    // A participant without a paired helper cannot address anyone else's helper.
+    const noHelperDelivery = expectNoMessage(helper);
+    const noOwnerEcho = expectNoMessage(owner);
+    peer.send(JSON.stringify({ type: 'helper-input', input }));
+    await noHelperDelivery;
+    await noOwnerEcho;
+    peer.send(
+      JSON.stringify({
+        type: 'helper-session-authorized',
+        session: {
+          controlSessionId: sessionId,
+          surfaceId: input.surfaceId,
+          scopes: ['pointer'],
+          expiresAt: Date.now() + 60_000,
+        },
+      }),
+    );
+    await expectNoMessage(helper);
+
+    // Schema-invalid and keyboard-like payloads are refused before routing.
+    const rejected = nextMessage(peer, 'protocol error');
+    peer.send(JSON.stringify({ type: 'helper-input', input: { ...input, type: 'input-key' } }));
+    expect((await rejected).type).toBe('protocol-error');
+
+    // Padding an otherwise valid envelope past the input size cap is rejected.
+    const oversized = nextMessage(owner, 'oversized input rejection');
+    owner.send(JSON.stringify({ type: 'helper-input', input }) + ' '.repeat(2048));
+    expect((await oversized).type).toBe('protocol-error');
+    await expectNoMessage(helper);
+
+    helper.close(1000, 'done');
+    owner.close();
+    peer.close();
+  });
+
+  it('refuses malformed helper messages and helper attempts to inject participant traffic', async () => {
+    const roomId = createRoomId();
+    const owner = await connect(roomId);
+    const ownerJoined = nextMessage(owner);
+    join(owner, roomId);
+    await ownerJoined;
+    await nextMessage(owner);
+    const peer = await connect(roomId);
+    const peerJoined = nextMessage(peer);
+    const ownerPeerJoined = nextMessage(owner);
+    join(peer, roomId);
+    await Promise.all([peerJoined, ownerPeerJoined]);
+    await nextMessage(peer);
+
+    for (const bad of [
+      { type: 'offer', payload: { sdp: 'v=0' } },
+      { type: 'helper-input', input: { type: 'input-scroll' } },
+      { type: 'helper-capabilities', availableScopes: ['pointer'], displays: [{ id: 1 }] },
+      { type: 'helper-capabilities', availableScopes: ['clipboard'] },
+      { type: 'control-revoked' },
+    ]) {
+      const created = nextMessage(owner, 'helper-pairing-created');
+      owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+      const pairing = (await created) as { type: string; payload: { token: string } };
+      const paired = nextMessage(owner, 'helper-paired');
+      const response = await app.request(
+        `/api/rooms/${roomId}/helper/ws`,
+        { headers: { Upgrade: 'websocket', Authorization: `Bearer ${pairing.payload.token}` } },
+        { ...env, ENVIRONMENT: 'production' },
+      );
+      const helper = (response as Response & { webSocket: WebSocket }).webSocket;
+      helper.accept();
+      await paired;
+      const closed = new Promise<number>((resolve) => {
+        helper.addEventListener('close', (event) => {
+          resolve(event.code);
+        });
+      });
+      const noPeerLeak = expectNoMessage(peer);
+      const disconnected = nextMessage(owner, 'helper-disconnected');
+      helper.send(JSON.stringify(bad));
+      expect(await closed, JSON.stringify(bad)).toBe(1008);
+      // The owner only learns the helper went away; nothing the helper sent is relayed.
+      expect((await disconnected).type).toBe('helper-disconnected');
+      await noPeerLeak;
+    }
+    peer.close();
+  });
+
   it('rejects expired helper pairing credentials', async () => {
     const now = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(now);

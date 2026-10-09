@@ -12,6 +12,13 @@ const peerHarness = vi.hoisted(() => ({
 }));
 
 vi.mock('@duplex/webrtc', () => ({
+  DATA_CHANNEL_LABELS: {
+    fileTransfer: 'duplex-file-transfer',
+    collaboration: 'duplex-collaboration',
+    pointer: 'duplex-pointer',
+    control: 'duplex-control',
+    input: 'duplex-input',
+  },
   toRtcIceServers: (
     iceServers: { urls: string | string[]; username?: string; credential?: string }[],
   ) => iceServers.map((server) => ({ ...server })),
@@ -389,5 +396,188 @@ describe('CallSessionService', () => {
     await joined(secondService);
     secondService.ngOnDestroy();
     expect(secondAudio.stopCount.value).toBe(1);
+  });
+
+  describe('native pointer control', () => {
+    function displayTrack(displaySurface?: string): ReturnType<typeof mediaTrack> {
+      const track = mediaTrack('video');
+      (track as unknown as { getSettings: () => MediaTrackSettings }).getSettings = () =>
+        displaySurface ? { displaySurface } : {};
+      return track;
+    }
+
+    function fakeChannel(label: string): {
+      label: string;
+      state: string;
+      bufferedAmount: number;
+      bufferedAmountLowThreshold: number;
+      sent: string[];
+      listeners: Set<(event: unknown) => void>;
+      sendText: (value: string) => void;
+      subscribe: (listener: (event: unknown) => void) => () => void;
+      close: () => void;
+      emit: (event: unknown) => void;
+    } {
+      const listeners = new Set<(event: unknown) => void>();
+      const channel = {
+        label,
+        state: 'open',
+        bufferedAmount: 0,
+        bufferedAmountLowThreshold: 0,
+        sent: [] as string[],
+        listeners,
+        sendText: (value: string) => channel.sent.push(value),
+        subscribe: (listener: (event: unknown) => void) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        close: () => undefined,
+        emit: (event: unknown) => {
+          for (const listener of listeners) listener(event);
+        },
+      };
+      return channel;
+    }
+
+    it.each([
+      ['monitor', ['pointer']],
+      ['window', []],
+      ['browser', []],
+      [undefined, []],
+    ])('derives native capability from displaySurface %s', async (surface, expected) => {
+      getDisplayMedia.mockResolvedValue(stream(displayTrack(surface)));
+      const service = joinRoom();
+      const socket = await joined(service, true);
+      await service.toggleScreenSharing();
+      socket.receive({ type: 'helper-paired', payload: {} });
+      socket.receive({ type: 'helper-capabilities', payload: { availableScopes: ['pointer'] } });
+      expect(service.control.localAvailableScopes()).toEqual(expected);
+      service.leave();
+    });
+
+    it('does not advertise keyboard even if the helper claims it', async () => {
+      getDisplayMedia.mockResolvedValue(stream(displayTrack('monitor')));
+      const service = joinRoom();
+      const socket = await joined(service, true);
+      await service.toggleScreenSharing();
+      socket.receive({ type: 'helper-paired', payload: {} });
+      socket.receive({
+        type: 'helper-capabilities',
+        payload: { availableScopes: ['pointer', 'keyboard'] },
+      });
+      expect(service.control.localAvailableScopes()).toEqual(['pointer']);
+      service.leave();
+    });
+
+    it('relays validated input to the helper, honours local stop, and stops after revoke', async () => {
+      getDisplayMedia.mockResolvedValue(stream(displayTrack('monitor')));
+      const service = joinRoom();
+      const socket = await joined(service, true);
+      await service.toggleScreenSharing();
+      socket.receive({ type: 'helper-paired', payload: {} });
+      socket.receive({ type: 'helper-capabilities', payload: { availableScopes: ['pointer'] } });
+      const controlChannel = fakeChannel('duplex-control');
+      const inputChannel = fakeChannel('duplex-input');
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: controlChannel });
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: inputChannel });
+      const surfaceId = service.collaboration.localSurfaceId();
+      controlChannel.emit({
+        type: 'message',
+        data: JSON.stringify({
+          type: 'control-request',
+          protocolVersion: 1,
+          surfaceId,
+          requestId: crypto.randomUUID(),
+          scopes: ['pointer'],
+        }),
+      });
+      service.control.allow();
+      const session = service.control.session();
+      if (!session) throw new Error('Control was not granted.');
+      const helperMessages = (): { type: string }[] =>
+        socket.sent.map((value) => JSON.parse(value) as { type: string });
+      expect(helperMessages().some((m) => m.type === 'helper-session-authorized')).toBe(true);
+
+      const input = {
+        type: 'input-pointer-move',
+        protocolVersion: 1,
+        controlSessionId: session.controlSessionId,
+        surfaceId: session.surfaceId,
+        sequence: 1,
+        x: 0.4,
+        y: 0.6,
+      };
+      inputChannel.emit({ type: 'message', data: JSON.stringify(input) });
+      expect(helperMessages().filter((m) => m.type === 'helper-input')).toEqual([
+        { type: 'helper-input', input },
+      ]);
+
+      // A stale session id never reaches the helper.
+      inputChannel.emit({
+        type: 'message',
+        data: JSON.stringify({ ...input, controlSessionId: crypto.randomUUID(), sequence: 2 }),
+      });
+      expect(helperMessages().filter((m) => m.type === 'helper-input')).toHaveLength(1);
+
+      // The local user stops control from the helper; the browser owns the revoke protocol.
+      socket.receive({
+        type: 'helper-stop-control',
+        payload: { controlSessionId: session.controlSessionId },
+      });
+      expect(service.control.session()).toBeNull();
+      expect(helperMessages().some((m) => m.type === 'helper-session-revoked')).toBe(true);
+      expect(
+        controlChannel.sent.map((value) => JSON.parse(value) as { type: string; reason?: string }),
+      ).toContainEqual(expect.objectContaining({ type: 'control-revoked', reason: 'user' }));
+      inputChannel.emit({ type: 'message', data: JSON.stringify({ ...input, sequence: 3 }) });
+      expect(helperMessages().filter((m) => m.type === 'helper-input')).toHaveLength(1);
+
+      // A stop for some other session id is ignored.
+      socket.receive({
+        type: 'helper-stop-control',
+        payload: { controlSessionId: crypto.randomUUID() },
+      });
+      service.leave();
+    });
+
+    it('turns the collaboration tool off when this browser starts controlling', async () => {
+      const service = joinRoom();
+      await joined(service, true);
+      const controlChannel = fakeChannel('duplex-control');
+      const inputChannel = fakeChannel('duplex-input');
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: controlChannel });
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: inputChannel });
+      const surfaceId = crypto.randomUUID();
+      service.collaboration.setTool('pointer');
+      service.control.setPeerMedia('screen', surfaceId);
+      controlChannel.emit({
+        type: 'message',
+        data: JSON.stringify({
+          type: 'control-capability',
+          protocolVersion: 1,
+          surfaceId,
+          helperConnected: true,
+          availableScopes: ['pointer'],
+        }),
+      });
+      service.control.requestControl();
+      const request = JSON.parse(controlChannel.sent.at(-1) ?? '{}') as { requestId: string };
+      service.collaboration.setTool('draw');
+      controlChannel.emit({
+        type: 'message',
+        data: JSON.stringify({
+          type: 'control-granted',
+          protocolVersion: 1,
+          surfaceId,
+          requestId: request.requestId,
+          controlSessionId: crypto.randomUUID(),
+          scopes: ['pointer'],
+          expiresAt: Date.now() + 60_000,
+        }),
+      });
+      expect(service.control.state()).toBe('controlling');
+      expect(service.collaboration.tool()).toBe('off');
+      service.leave();
+    });
   });
 });

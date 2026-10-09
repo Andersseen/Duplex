@@ -6,6 +6,11 @@ import {
   MAX_FILE_TRANSFER_BYTES,
   CONTROL_PROTOCOL_VERSION,
   HELPER_PAIRING_PREFIX,
+  INPUT_PROTOCOL_VERSION,
+  MAX_INPUT_SCROLL_DELTA,
+  inputMessageSchema,
+  helperBridgeMessageSchema,
+  helperOutboundMessageSchema,
   decodeHelperPairingBundle,
   encodeHelperPairingBundle,
   controlMessageSchema,
@@ -260,7 +265,8 @@ describe('control messages', () => {
   const base = { protocolVersion: CONTROL_PROTOCOL_VERSION, surfaceId };
   it('accepts a request, grant, rejection and revocation', () => {
     for (const message of [
-      { type: 'control-capability', ...base, helperConnected: true },
+      { type: 'control-capability', ...base, helperConnected: true, availableScopes: ['pointer'] },
+      { type: 'control-capability', ...base, helperConnected: false, availableScopes: [] },
       { type: 'control-request', ...base, requestId, scopes: ['pointer', 'keyboard'] },
       {
         type: 'control-granted',
@@ -381,5 +387,131 @@ describe('health response', () => {
     const body = { status: 'ok', service: 'duplex-worker', protocolVersion: PROTOCOL_VERSION };
     expect(healthResponseSchema.safeParse(body).success).toBe(true);
     expect(healthResponseSchema.safeParse({ ...body, status: 'down' }).success).toBe(false);
+  });
+});
+
+describe('control capability', () => {
+  const base = {
+    type: 'control-capability',
+    protocolVersion: CONTROL_PROTOCOL_VERSION,
+    surfaceId: crypto.randomUUID(),
+    helperConnected: true,
+  };
+  it('requires explicit, unique, known available scopes', () => {
+    expect(controlMessageSchema.safeParse(base).success).toBe(false);
+    for (const availableScopes of [['pointer', 'pointer'], ['clipboard'], 'pointer'])
+      expect(controlMessageSchema.safeParse({ ...base, availableScopes }).success).toBe(false);
+    expect(controlMessageSchema.safeParse({ ...base, availableScopes: [], x: 1 }).success).toBe(
+      false,
+    );
+  });
+});
+
+describe('input messages', () => {
+  const ids = {
+    protocolVersion: INPUT_PROTOCOL_VERSION,
+    controlSessionId: crypto.randomUUID(),
+    surfaceId: crypto.randomUUID(),
+    sequence: 1,
+  };
+  const move = { type: 'input-pointer-move', ...ids, x: 0.5, y: 0.25 };
+  const button = {
+    type: 'input-pointer-button',
+    ...ids,
+    button: 'left',
+    state: 'down',
+    x: 0,
+    y: 1,
+  };
+  const scroll = { type: 'input-scroll', ...ids, deltaX: -10, deltaY: 120 };
+  const ok = (value: unknown): boolean => inputMessageSchema.safeParse(value).success;
+
+  it('accepts pointer move, left/right down/up and scroll', () => {
+    expect(ok(move)).toBe(true);
+    for (const b of ['left', 'right'])
+      for (const state of ['down', 'up']) expect(ok({ ...button, button: b, state })).toBe(true);
+    expect(ok(scroll)).toBe(true);
+  });
+
+  it('accepts the normalized coordinate and scroll boundaries only', () => {
+    for (const [x, y] of [
+      [0, 0],
+      [1, 1],
+    ])
+      expect(ok({ ...move, x, y })).toBe(true);
+    for (const [x, y] of [
+      [-0.0001, 0],
+      [0, 1.0001],
+      [2, 2],
+    ])
+      expect(ok({ ...move, x, y })).toBe(false);
+    expect(ok({ ...scroll, deltaY: MAX_INPUT_SCROLL_DELTA })).toBe(true);
+    expect(ok({ ...scroll, deltaY: MAX_INPUT_SCROLL_DELTA + 1 })).toBe(false);
+    expect(ok({ ...scroll, deltaX: -MAX_INPUT_SCROLL_DELTA - 1 })).toBe(false);
+  });
+
+  it('rejects non-finite numbers, bad enums, ids, versions, sequences and extra keys', () => {
+    for (const bad of [
+      { ...move, x: Number.NaN },
+      { ...move, y: Number.POSITIVE_INFINITY },
+      { ...scroll, deltaX: Number.NaN },
+      { ...scroll, deltaY: Number.NEGATIVE_INFINITY },
+      { ...button, button: 'middle' },
+      { ...button, state: 'click' },
+      { ...move, controlSessionId: 'nope' },
+      { ...move, surfaceId: '123' },
+      { ...move, protocolVersion: 2 },
+      { ...move, sequence: -1 },
+      { ...move, sequence: 1.5 },
+      { ...move, sequence: 2 ** 32 },
+      { ...move, extra: true },
+      { ...scroll, key: 'a' },
+      { type: 'input-key', ...ids, key: 'a' },
+      { type: 'input-pointer-move', ...ids, x: 0.5 },
+    ])
+      expect(ok(bad), JSON.stringify(bad)).toBe(false);
+  });
+
+  it('is accepted only wrapped for the helper, never as helper-originated', () => {
+    expect(helperBridgeMessageSchema.safeParse({ type: 'helper-input', input: move }).success).toBe(
+      true,
+    );
+    expect(
+      helperOutboundMessageSchema.safeParse({ type: 'helper-input', input: move }).success,
+    ).toBe(false);
+    expect(
+      signalingMessageSchema.safeParse({ type: 'helper-input', input: { ...move, extra: 1 } })
+        .success,
+    ).toBe(false);
+    expect(signalingMessageSchema.safeParse({ type: 'helper-input', input: move }).success).toBe(
+      true,
+    );
+  });
+});
+
+describe('helper outbound messages', () => {
+  it('accepts ready, capabilities and stop-control, and rejects anything richer', () => {
+    const controlSessionId = crypto.randomUUID();
+    for (const message of [
+      { type: 'helper-ready' },
+      { type: 'helper-capabilities', availableScopes: [] },
+      { type: 'helper-capabilities', availableScopes: ['pointer'] },
+      { type: 'helper-stop-control', controlSessionId },
+    ])
+      expect(helperOutboundMessageSchema.safeParse(message).success, message.type).toBe(true);
+    for (const message of [
+      { type: 'helper-capabilities', availableScopes: ['pointer'], displays: [] },
+      { type: 'helper-capabilities', availableScopes: ['pointer', 'pointer'] },
+      { type: 'helper-stop-control', controlSessionId: 'x' },
+      { type: 'helper-stop-control' },
+      { type: 'helper-ready', token: 'secret' },
+    ])
+      expect(helperOutboundMessageSchema.safeParse(message).success).toBe(false);
+    expect(
+      serverRoomMessageSchema.safeParse({
+        type: 'helper-capabilities',
+        payload: { availableScopes: ['pointer'] },
+      }).success,
+    ).toBe(true);
   });
 });

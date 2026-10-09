@@ -36,6 +36,13 @@ class FakeChannel implements DuplexDataChannel {
   }
 }
 
+/** A paired helper that can execute pointer control for a monitor share. */
+function readyHelper(service: ControlService, surfaceId: string): void {
+  service.setLocalScreen(surfaceId, true);
+  service.setHelperConnected(true);
+  service.setHelperScopes(['pointer']);
+}
+
 describe('ControlService', () => {
   it('requests only when peer screen and helper capability are current', () => {
     const service = new ControlService();
@@ -50,6 +57,7 @@ describe('ControlService', () => {
       protocolVersion: 1,
       surfaceId: peerSurface,
       helperConnected: true,
+      availableScopes: ['pointer'],
     });
     expect(service.canRequest()).toBe(true);
     service.requestControl(['pointer']);
@@ -72,8 +80,7 @@ describe('ControlService', () => {
     service.setHelperSessionListener(helperChange);
     service.attachChannel(channel);
     channel.open();
-    service.setLocalScreen(hostSurface);
-    service.setHelperConnected(true);
+    readyHelper(service, hostSurface);
     channel.receive({
       type: 'control-request',
       protocolVersion: 1,
@@ -92,7 +99,7 @@ describe('ControlService', () => {
       protocolVersion: 1,
       surfaceId: hostSurface,
       requestId,
-      scopes: ['pointer', 'keyboard'],
+      scopes: ['pointer'],
     });
     expect(service.state()).toBe('incoming-request');
     service.allow(['pointer']);
@@ -123,6 +130,7 @@ describe('ControlService', () => {
       protocolVersion: 1,
       surfaceId,
       helperConnected: true,
+      availableScopes: ['pointer'],
     });
     service.requestControl(['pointer']);
     const request = JSON.parse(channel.sent.at(-1) ?? '{}') as { requestId: string };
@@ -142,6 +150,7 @@ describe('ControlService', () => {
       protocolVersion: 1,
       surfaceId: crypto.randomUUID(),
       helperConnected: true,
+      availableScopes: ['pointer'],
     });
     expect(service.canRequest()).toBe(true);
     vi.clearAllTimers();
@@ -156,8 +165,7 @@ describe('ControlService', () => {
     service.setHelperSessionListener((...event) => helperEvents.push(event));
     service.attachChannel(channel);
     channel.open();
-    service.setLocalScreen(surfaceId);
-    service.setHelperConnected(true);
+    readyHelper(service, surfaceId);
 
     const grant = (requestId: string): void => {
       channel.receive({
@@ -178,7 +186,7 @@ describe('ControlService', () => {
       reason: 'surface-ended',
     });
 
-    service.setLocalScreen(surfaceId);
+    readyHelper(service, surfaceId);
     grant(crypto.randomUUID());
     service.setHelperConnected(false);
     expect(service.session()).toBeNull();
@@ -187,7 +195,7 @@ describe('ControlService', () => {
       reason: 'helper-disconnected',
     });
 
-    service.setHelperConnected(true);
+    readyHelper(service, surfaceId);
     grant(crypto.randomUUID());
     channel.close();
     expect(service.session()).toBeNull();
@@ -202,8 +210,7 @@ describe('ControlService', () => {
     const surfaceId = crypto.randomUUID();
     service.attachChannel(channel);
     channel.open();
-    service.setLocalScreen(surfaceId);
-    service.setHelperConnected(true);
+    readyHelper(service, surfaceId);
     channel.receive({
       type: 'control-request',
       protocolVersion: 1,
@@ -231,15 +238,193 @@ describe('ControlService', () => {
       protocolVersion: 1,
       surfaceId,
       helperConnected: true,
+      availableScopes: ['pointer'],
     });
     service.requestControl(['pointer']);
     const originalRequestCount = channel.sent.length;
-    service.requestControl(['keyboard']);
+    service.requestControl(['pointer']);
     expect(channel.sent).toHaveLength(originalRequestCount);
     vi.advanceTimersByTime(30_000);
     expect(service.state()).toBe('revoked');
-    service.requestControl(['keyboard']);
+    service.requestControl(['pointer']);
     expect(channel.sent).toHaveLength(originalRequestCount + 1);
     vi.useRealTimers();
+  });
+
+  describe('available scopes', () => {
+    function setup(): { service: ControlService; channel: FakeChannel; surfaceId: string } {
+      const service = new ControlService();
+      const channel = new FakeChannel();
+      service.attachChannel(channel);
+      channel.open();
+      return { service, channel, surfaceId: crypto.randomUUID() };
+    }
+    const lastSent = (channel: FakeChannel): Record<string, unknown> =>
+      JSON.parse(channel.sent.at(-1) ?? '{}') as Record<string, unknown>;
+
+    it('announces only what the helper reports, and only for a monitor share', () => {
+      const { service, channel, surfaceId } = setup();
+      service.setLocalScreen(surfaceId, false);
+      service.setHelperConnected(true);
+      service.setHelperScopes(['pointer']);
+      expect(lastSent(channel)).toMatchObject({ helperConnected: true, availableScopes: [] });
+      service.setLocalScreen(surfaceId, true);
+      expect(lastSent(channel)).toMatchObject({ availableScopes: ['pointer'] });
+      service.setHelperScopes([]);
+      expect(lastSent(channel)).toMatchObject({ helperConnected: true, availableScopes: [] });
+    });
+
+    it('never advertises keyboard even if a helper reports it', () => {
+      const { service, channel, surfaceId } = setup();
+      service.setLocalScreen(surfaceId, true);
+      service.setHelperConnected(true);
+      service.setHelperScopes(['pointer', 'keyboard']);
+      expect(lastSent(channel)).toMatchObject({ availableScopes: ['pointer'] });
+      expect(service.localAvailableScopes()).toEqual(['pointer']);
+    });
+
+    it('clears helper scopes when the helper disconnects', () => {
+      const { service, channel, surfaceId } = setup();
+      readyHelper(service, surfaceId);
+      service.setHelperConnected(false);
+      expect(service.localAvailableScopes()).toEqual([]);
+      expect(lastSent(channel)).toMatchObject({ helperConnected: false, availableScopes: [] });
+    });
+
+    it('rejects requests for scopes the helper cannot execute and never grants them', () => {
+      const { service, channel, surfaceId } = setup();
+      readyHelper(service, surfaceId);
+      const requestId = crypto.randomUUID();
+      channel.receive({
+        type: 'control-request',
+        protocolVersion: 1,
+        surfaceId,
+        requestId,
+        scopes: ['pointer', 'keyboard'],
+      });
+      expect(service.incomingRequest()).toBeNull();
+      expect(lastSent(channel)).toMatchObject({ type: 'control-rejected', requestId });
+      // Without a monitor share nothing is executable, so even a pointer request is refused.
+      service.setLocalScreen(surfaceId, false);
+      channel.receive({
+        type: 'control-request',
+        protocolVersion: 1,
+        surfaceId,
+        requestId: crypto.randomUUID(),
+        scopes: ['pointer'],
+      });
+      expect(service.incomingRequest()).toBeNull();
+      expect(service.session()).toBeNull();
+    });
+
+    it('does not let the controller request an unadvertised scope or request with no capability', () => {
+      const { service, channel, surfaceId } = setup();
+      service.setPeerMedia('screen', surfaceId);
+      channel.receive({
+        type: 'control-capability',
+        protocolVersion: 1,
+        surfaceId,
+        helperConnected: true,
+        availableScopes: [],
+      });
+      expect(service.canRequest()).toBe(false);
+      channel.receive({
+        type: 'control-capability',
+        protocolVersion: 1,
+        surfaceId,
+        helperConnected: true,
+        availableScopes: ['pointer'],
+      });
+      expect(service.canRequest()).toBe(true);
+      const sent = channel.sent.length;
+      service.requestControl(['keyboard']);
+      service.requestControl(['pointer', 'keyboard']);
+      expect(channel.sent).toHaveLength(sent);
+      service.requestControl();
+      expect(lastSent(channel)).toMatchObject({ type: 'control-request', scopes: ['pointer'] });
+      vi.clearAllTimers();
+    });
+
+    it('revokes an active grant when the helper loses the pointer capability', () => {
+      vi.useFakeTimers();
+      const { service, channel, surfaceId } = setup();
+      const helperEvents: unknown[][] = [];
+      service.setHelperSessionListener((...event) => helperEvents.push(event));
+      readyHelper(service, surfaceId);
+      channel.receive({
+        type: 'control-request',
+        protocolVersion: 1,
+        surfaceId,
+        requestId: crypto.randomUUID(),
+        scopes: ['pointer'],
+      });
+      service.allow();
+      expect(service.session()).not.toBeNull();
+      service.setHelperScopes([]);
+      expect(service.session()).toBeNull();
+      expect(lastSent(channel)).toMatchObject({
+        type: 'control-revoked',
+        reason: 'capability-lost',
+      });
+      expect(helperEvents.at(-1)?.[0]).toBeNull();
+      vi.useRealTimers();
+    });
+
+    it('stops controlling when the peer announces it lost the capability', () => {
+      vi.useFakeTimers();
+      const { service, channel, surfaceId } = setup();
+      service.setPeerMedia('screen', surfaceId);
+      const capability = (availableScopes: string[]): void => {
+        channel.receive({
+          type: 'control-capability',
+          protocolVersion: 1,
+          surfaceId,
+          helperConnected: true,
+          availableScopes,
+        });
+      };
+      capability(['pointer']);
+      service.requestControl(['pointer']);
+      const request = lastSent(channel) as { requestId: string };
+      channel.receive({
+        type: 'control-granted',
+        protocolVersion: 1,
+        surfaceId,
+        requestId: request.requestId,
+        controlSessionId: crypto.randomUUID(),
+        scopes: ['pointer'],
+        expiresAt: Date.now() + 60_000,
+      });
+      expect(service.state()).toBe('controlling');
+      capability([]);
+      expect(service.session()).toBeNull();
+      expect(service.canRequest()).toBe(false);
+      vi.useRealTimers();
+    });
+
+    it('notifies observers before a session ends so held input can be released', () => {
+      vi.useFakeTimers();
+      const { service, channel, surfaceId } = setup();
+      readyHelper(service, surfaceId);
+      const events: string[] = [];
+      service.addSessionObserver((event, session) => {
+        events.push(
+          `${event}:${String(service.session()?.controlSessionId === session.controlSessionId)}`,
+        );
+      });
+      channel.receive({
+        type: 'control-request',
+        protocolVersion: 1,
+        surfaceId,
+        requestId: crypto.randomUUID(),
+        scopes: ['pointer'],
+      });
+      service.allow();
+      service.release();
+      expect(events[0]).toBe('started:true');
+      // The session is still current when 'ending' fires.
+      expect(events[1]).toBe('ending:true');
+      vi.useRealTimers();
+    });
   });
 });

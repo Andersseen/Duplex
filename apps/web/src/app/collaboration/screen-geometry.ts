@@ -41,11 +41,17 @@ export function clientToNormalized(
   element: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
   videoWidth: number,
   videoHeight: number,
+  clamp = false,
 ): { readonly x: number; readonly y: number } | null {
   const content = containedVideoRect(element.width, element.height, videoWidth, videoHeight);
   if (!content) return null;
-  const x = clientX - element.left - content.left;
-  const y = clientY - element.top - content.top;
+  let x = clientX - element.left - content.left;
+  let y = clientY - element.top - content.top;
+  if (clamp) {
+    // Used while a pointer is captured: dragging past the edge pins to the edge instead of vanishing.
+    x = Math.min(content.width, Math.max(0, x));
+    y = Math.min(content.height, Math.max(0, y));
+  }
   if (x < 0 || y < 0 || x > content.width || y > content.height) return null;
   return { x: x / content.width, y: y / content.height };
 }

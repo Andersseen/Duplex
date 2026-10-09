@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 type HelperStatus = 'not-connected' | 'connecting' | 'connected' | 'authorized' | 'error';
+type Accessibility = 'unsupported' | 'not-granted' | 'granted';
 interface SessionMetadata {
   controlSessionId: string;
   surfaceId: string;
@@ -14,19 +15,36 @@ interface HelperStatusEvent {
   status: HelperStatus;
   details?: SessionMetadata | { message?: string } | null;
 }
+interface DisplayInfo {
+  id: number;
+  name: string;
+  width: number;
+  height: number;
+  selected: boolean;
+}
+/** Local-only native readiness. None of this is ever sent to the remote participant. */
+interface NativeStatus {
+  platform: 'macos' | 'unsupported';
+  accessibility: Accessibility;
+  displays: readonly DisplayInfo[];
+  selectedDisplayId: number | null;
+  pointerReady: boolean;
+  keyboardAvailable: boolean;
+  sessionActive: boolean;
+}
 
 const STATUS_LABELS: Record<HelperStatus, string> = {
   'not-connected': 'Not connected',
   connecting: 'Connecting to Duplex…',
   connected: 'Connected to Duplex call · Waiting for control permission',
-  authorized: 'Control session authorized',
+  authorized: 'Peer may control this Mac',
   error: 'Could not connect to Duplex.',
 };
 
 @Component({
   selector: 'dx-root',
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'shell' },
+  host: { class: 'shell', '(window:focus)': 'refreshNative()' },
   styles: `
     .shell {
       display: flex;
@@ -35,7 +53,7 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
       justify-content: center;
       gap: 0.75rem;
       box-sizing: border-box;
-      padding: 2rem;
+      padding: 1.5rem 2rem;
       max-width: 38rem;
       margin: auto;
     }
@@ -44,18 +62,47 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
       font-size: 2rem;
       letter-spacing: -0.02em;
     }
+    h2 {
+      margin: 0;
+      font-size: 1rem;
+    }
     p {
       margin: 0;
       opacity: 0.75;
     }
     .status {
-      margin-top: 1rem;
+      margin-top: 0.5rem;
       opacity: 1;
       font-weight: 500;
+    }
+    section {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding: 0.75rem 1rem;
+      border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+      border-radius: 0.75rem;
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+    .badge {
+      font-weight: 600;
     }
     textarea {
       min-height: 7rem;
       resize: vertical;
+    }
+    fieldset {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      margin: 0;
+      padding: 0;
+      border: 0;
     }
   `,
   template: `
@@ -77,14 +124,65 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
       }
       <button type="button" [disabled]="!pairingCode().trim()" (click)="connect()">Connect</button>
     }
+    @if (native(); as state) {
+      <section aria-label="Native pointer control">
+        @if (state.platform === 'unsupported') {
+          <p>Native pointer control is available on macOS only. Pairing still works.</p>
+        } @else {
+          <div class="row">
+            <h2>Accessibility</h2>
+            @if (state.accessibility === 'granted') {
+              <span class="badge">Granted</span>
+            } @else {
+              <button type="button" (click)="requestAccessibility()">Enable Accessibility</button>
+            }
+          </div>
+          @if (state.accessibility !== 'granted') {
+            <p>
+              Allow Duplex Helper in System Settings › Privacy &amp; Security › Accessibility, then
+              re-check.
+              <button type="button" (click)="refreshNative()">Re-check</button>
+            </p>
+          }
+          <fieldset>
+            <legend><h2>Control target</h2></legend>
+            @for (display of state.displays; track display.id) {
+              <label>
+                <input
+                  type="radio"
+                  name="control-display"
+                  [checked]="display.selected"
+                  (change)="selectDisplay(display.id)"
+                />
+                {{ display.name }} — {{ display.width }} × {{ display.height }}
+              </label>
+            } @empty {
+              <p>No active display found.</p>
+            }
+            @if (state.displays.length > 1 && state.selectedDisplayId === null) {
+              <p>Choose the display your peer may control.</p>
+            }
+          </fieldset>
+          <div class="row">
+            <h2>Pointer control</h2>
+            <span class="badge">{{ pointerLabel() }}</span>
+          </div>
+        }
+        <div class="row">
+          <h2>Keyboard control</h2>
+          <span class="badge">Not implemented yet</span>
+        </div>
+      </section>
+    }
     @if (status() === 'connecting' || status() === 'connected' || status() === 'authorized') {
       @if (session(); as activeSession) {
         <section aria-label="Authorized control session">
-          <p>{{ activeSession.scopes.join(' · ') }}</p>
+          <h2>Peer may control this Mac</h2>
+          <p>{{ sessionScopes() }}</p>
           <p>Expires in {{ expiryLabel() }}</p>
+          <button type="button" (click)="stopControl()">Stop control</button>
         </section>
       }
-      <p class="note">Native mouse and keyboard input is not implemented yet.</p>
       <button type="button" (click)="disconnect()">Disconnect</button>
     }
   `,
@@ -94,40 +192,50 @@ export class App implements OnDestroy {
   protected readonly pairingCode = signal('');
   protected readonly error = signal('');
   protected readonly session = signal<SessionMetadata | null>(null);
+  protected readonly native = signal<NativeStatus | null>(null);
   protected readonly remainingSeconds = signal(0);
   protected readonly statusLabel = computed(() => STATUS_LABELS[this.status()]);
   protected readonly expiryLabel = computed(() => {
     const seconds = this.remainingSeconds();
     return `${String(Math.floor(seconds / 60))}:${String(seconds % 60).padStart(2, '0')}`;
   });
-  private unlisten: (() => void) | null = null;
+  /** Only pointer is executable; a stray keyboard scope is never presented as working. */
+  protected readonly sessionScopes = computed(() =>
+    this.session()?.scopes.includes('pointer') ? 'Pointer' : 'No supported scope',
+  );
+  protected readonly pointerLabel = computed(() => {
+    const state = this.native();
+    if (!state || state.platform === 'unsupported') return 'Unavailable';
+    if (state.sessionActive) return 'In use';
+    if (state.pointerReady) return 'Ready';
+    if (state.accessibility !== 'granted') return 'Enable Accessibility first';
+    return 'Choose a display';
+  });
+  private unlisten: (() => void)[] = [];
+  private destroyed = false;
   private expiryInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
-    void listen<HelperStatusEvent>('helper-state', ({ payload }) => {
-      this.status.set(payload.status);
-      if (
-        payload.status === 'authorized' &&
-        payload.details &&
-        'controlSessionId' in payload.details
-      ) {
-        this.session.set(payload.details);
-        this.startExpiryCountdown(payload.details.expiresAt);
-      } else if (payload.status !== 'authorized') {
+    this.subscribe('helper-state', (payload) => {
+      const { status, details } = payload as HelperStatusEvent;
+      this.status.set(status);
+      if (status === 'authorized' && details && 'controlSessionId' in details) {
+        this.session.set(details);
+        this.startExpiryCountdown(details.expiresAt);
+      } else if (status !== 'authorized') {
         this.session.set(null);
         this.stopExpiryCountdown();
       }
       this.error.set(
-        payload.status === 'error' && payload.details && 'message' in payload.details
-          ? (payload.details.message ??
-              'Could not connect to Duplex. Check the pairing code and network.')
+        status === 'error' && details && 'message' in details
+          ? (details.message ?? 'Could not connect to Duplex. Check the pairing code and network.')
           : '',
       );
-    })
-      .then((unlisten) => {
-        this.unlisten = unlisten;
-      })
-      .catch(() => undefined);
+    });
+    this.subscribe('native-state', (state) => {
+      this.native.set(state as NativeStatus);
+    });
+    void this.refreshNative();
   }
 
   protected setPairingCode(event: Event): void {
@@ -160,9 +268,53 @@ export class App implements OnDestroy {
     this.stopExpiryCountdown();
   }
 
-  ngOnDestroy(): void {
-    this.unlisten?.();
+  /** Explicit local action: the only way an Accessibility prompt is ever shown. */
+  protected async requestAccessibility(): Promise<void> {
+    await this.command('request_accessibility');
+  }
+
+  /** Cheap re-check, run on window focus and from the Re-check button — never on a timer. */
+  protected async refreshNative(): Promise<void> {
+    await this.command('refresh_accessibility_status');
+  }
+
+  protected async selectDisplay(displayId: number): Promise<void> {
+    await this.command('select_display', { displayId });
+  }
+
+  /** Local emergency stop. The helper stays paired and connected. */
+  protected async stopControl(): Promise<void> {
+    await this.command('stop_control');
+    this.session.set(null);
     this.stopExpiryCountdown();
+    if (this.status() === 'authorized') this.status.set('connected');
+  }
+
+  ngOnDestroy(): void {
+    this.destroyed = true;
+    for (const unlisten of this.unlisten) unlisten();
+    this.unlisten = [];
+    this.stopExpiryCountdown();
+  }
+
+  private async command(name: string, args?: Record<string, unknown>): Promise<void> {
+    try {
+      const state = await invoke<NativeStatus | undefined>(name, args);
+      if (state) this.native.set(state);
+    } catch {
+      /* Native state stays as it was; the next event or re-check corrects it. */
+    }
+  }
+
+  private subscribe(name: string, handler: (payload: unknown) => void): void {
+    listen(name, ({ payload }) => {
+      handler(payload);
+    })
+      .then((unlisten) => {
+        if (this.destroyed) unlisten();
+        else this.unlisten.push(unlisten);
+      })
+      .catch(() => undefined);
   }
 
   private startExpiryCountdown(expiresAt: number): void {

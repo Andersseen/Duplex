@@ -10,6 +10,11 @@ const scopes = z
   .min(1)
   .max(2)
   .refine((values) => new Set(values).size === values.length, 'Scopes must be unique.');
+export const controlScopeSchema = z.enum(['pointer', 'keyboard']);
+const availableScopes = z
+  .array(controlScopeSchema)
+  .max(2)
+  .refine((values) => new Set(values).size === values.length, 'Scopes must be unique.');
 const controlBase = {
   protocolVersion: z.literal(CONTROL_PROTOCOL_VERSION),
   surfaceId: uuid,
@@ -20,6 +25,8 @@ export const controlCapabilityMessageSchema = z
     type: z.literal('control-capability'),
     ...controlBase,
     helperConnected: z.boolean(),
+    /** Scopes the paired helper can execute right now; empty when none. */
+    availableScopes,
   })
   .strict();
 
@@ -58,6 +65,7 @@ export const controlRevocationReasonSchema = z.enum([
   'surface-ended',
   'helper-disconnected',
   'superseded',
+  'capability-lost',
 ]);
 export const controlRevokedMessageSchema = z
   .object({

@@ -233,15 +233,17 @@ describe('createDuplexPeer', () => {
       localStream: createLocalStream(),
       createPeerConnection: () => ownerConnection.asPeerConnection(),
     });
-    expect(ownerConnection.dataChannels).toHaveLength(4);
+    expect(ownerConnection.dataChannels).toHaveLength(5);
     expect(ownerConnection.dataChannels[0]?.label).toBe('duplex-file-transfer');
     expect(ownerConnection.dataChannels[1]?.label).toBe('duplex-collaboration');
     expect(ownerConnection.dataChannels[2]?.label).toBe('duplex-pointer');
     expect(ownerConnection.dataChannels[3]?.label).toBe('duplex-control');
+    expect(ownerConnection.dataChannels[4]?.label).toBe('duplex-input');
     expect(ownerConnection.dataChannelOptions).toEqual([
       { ordered: true },
       { ordered: true },
       { ordered: false, maxRetransmits: 0 },
+      { ordered: true },
       { ordered: true },
     ]);
     const ownerEvents: string[] = [];
@@ -260,7 +262,7 @@ describe('createDuplexPeer', () => {
     const raw = ownerConnection.dataChannels[0];
     if (!raw) throw new Error('Impolite peer did not create its file channel.');
     raw.open();
-    expect(ownerEvents).toEqual(['channel', 'channel', 'channel', 'channel', 'open']);
+    expect(ownerEvents).toEqual(['channel', 'channel', 'channel', 'channel', 'channel', 'open']);
     ownerChannel?.sendText('control');
     const bytes = new Uint8Array([1, 2, 3]).buffer;
     ownerChannel?.sendBinary(bytes);
@@ -285,6 +287,7 @@ describe('createDuplexPeer', () => {
       'duplex-collaboration',
       'duplex-pointer',
       'duplex-control',
+      'duplex-input',
     ].map((label) => new FakeDataChannel(label));
     for (const channel of incoming)
       politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
@@ -300,7 +303,7 @@ describe('createDuplexPeer', () => {
     politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
       channel: unknown as unknown as RTCDataChannel,
     } as RTCDataChannelEvent);
-    expect(accepted).toHaveLength(4);
+    expect(accepted).toHaveLength(5);
     expect(duplicate.readyState).toBe('closed');
     expect(unknown.readyState).toBe('closed');
     expect(politeConnection.closed).toBe(false);
@@ -320,9 +323,69 @@ describe('createDuplexPeer', () => {
       localStream: createLocalStream(),
       createPeerConnection: () => replacementConnection.asPeerConnection(),
     });
-    expect(replacementConnection.dataChannels).toHaveLength(4);
+    expect(replacementConnection.dataChannels).toHaveLength(5);
     expect(replacementConnection.dataChannels[0]).not.toBe(raw);
     replacement.close();
+  });
+
+  it('creates duplex-input as reliable ordered on the impolite side and accepts it once on the polite side', () => {
+    const ownerConnection = new FakeConnection();
+    const owner = createDuplexPeer(new FakeTransport(), {
+      polite: false,
+      localStream: createLocalStream(),
+      createPeerConnection: () => ownerConnection.asPeerConnection(),
+    });
+    const inputIndex = ownerConnection.dataChannels.findIndex(
+      (channel) => channel.label === 'duplex-input',
+    );
+    expect(inputIndex).toBeGreaterThanOrEqual(0);
+    const options = ownerConnection.dataChannelOptions[inputIndex];
+    expect(options).toEqual({ ordered: true });
+    expect(options).not.toHaveProperty('maxRetransmits');
+    expect(options).not.toHaveProperty('maxPacketLifeTime');
+
+    const politeConnection = new FakeConnection();
+    const polite = createDuplexPeer(new FakeTransport(), {
+      polite: true,
+      localStream: createLocalStream(),
+      createPeerConnection: () => politeConnection.asPeerConnection(),
+    });
+    expect(politeConnection.dataChannels).toHaveLength(0);
+    const labels: string[] = [];
+    polite.subscribe((event) => {
+      if (event.type === 'data-channel') labels.push(event.channel.label);
+    });
+    const deliver = (channel: FakeDataChannel): void => {
+      politeConnection.ondatachannel?.call(politeConnection.asPeerConnection(), {
+        channel: channel as unknown as RTCDataChannel,
+      } as RTCDataChannelEvent);
+    };
+    const input = new FakeDataChannel('duplex-input');
+    const control = new FakeDataChannel('duplex-control');
+    deliver(input);
+    deliver(control);
+    const duplicate = new FakeDataChannel('duplex-input');
+    deliver(duplicate);
+    expect(labels).toEqual(['duplex-input', 'duplex-control']);
+    expect(duplicate.readyState).toBe('closed');
+    expect(input.readyState).not.toBe('closed');
+
+    // Closing input leaves every other channel and the connection alone.
+    input.close();
+    expect(control.readyState).not.toBe('closed');
+    expect(politeConnection.closed).toBe(false);
+    // A closed label is released, so a replacement input channel can be accepted.
+    const replacement = new FakeDataChannel('duplex-input');
+    deliver(replacement);
+    expect(labels).toEqual(['duplex-input', 'duplex-control', 'duplex-input']);
+
+    owner.close();
+    polite.close();
+    expect(ownerConnection.dataChannels.every((channel) => channel.readyState === 'closed')).toBe(
+      true,
+    );
+    expect(control.readyState).toBe('closed');
+    expect(replacement.readyState).toBe('closed');
   });
 
   it('uses supplied ICE servers and updates them without rebuilding the peer', () => {
