@@ -590,6 +590,11 @@ export class CallSessionService implements OnDestroy {
     this.rtcRefreshTimer = null;
     if (this.helperPairingTimer) clearTimeout(this.helperPairingTimer);
     this.helperPairingTimer = null;
+    // A pairing code is a short-lived credential; never keep one around after the call ends.
+    this.helperPairingCode.set(null);
+    this.helperPairingExpiresAt.set(null);
+    this.helperConnected.set(false);
+    this.control.setHelperConnected(false);
     this.closePeer();
     this.control.setLocalScreen(null);
     this.currentRoomId = null;

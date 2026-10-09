@@ -81,4 +81,54 @@ describe('generateRtcConfiguration', () => {
       relayAvailable: false,
     });
   });
+
+  it.each([
+    [
+      'TURN servers on a foreign host',
+      [
+        { urls: [CLOUDFLARE_STUN_SERVER] },
+        { urls: 'turn:turn.evil.test:3478?transport=udp', username: 'u', credential: 'c' },
+      ],
+    ],
+    [
+      'TURN servers without credentials',
+      [{ urls: [CLOUDFLARE_STUN_SERVER] }, { urls: 'turn:turn.cloudflare.com:3478?transport=udp' }],
+    ],
+    [
+      'a response with no STUN server',
+      [{ urls: 'turn:turn.cloudflare.com:3478?transport=udp', username: 'u', credential: 'c' }],
+    ],
+    ['a response with no TURN server', [{ urls: [CLOUDFLARE_STUN_SERVER] }]],
+  ])('refuses %s and falls back to STUN', async (_label, iceServers) => {
+    const result = await generateRtcConfiguration(
+      { TURN_KEY_ID: 'test-key', TURN_KEY_API_TOKEN: 'test-api-token' },
+      vi.fn(() => Promise.resolve(Response.json({ iceServers }))),
+      1_000,
+    );
+
+    expect(result.relayAvailable).toBe(false);
+    expect(result.iceServers).toEqual([{ urls: CLOUDFLARE_STUN_SERVER }]);
+  });
+
+  it('never writes the TURN API token or credentials to the logs', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      await generateRtcConfiguration(
+        { TURN_KEY_ID: 'test-key', TURN_KEY_API_TOKEN: 'secret-api-token' },
+        vi.fn(() => Promise.reject(new Error('failed with Bearer secret-api-token'))),
+        1_000,
+      );
+      await generateRtcConfiguration(
+        { TURN_KEY_ID: 'test-key', TURN_KEY_API_TOKEN: 'secret-api-token' },
+        vi.fn(() => Promise.resolve(Response.json(validResponse, { status: 500 }))),
+        1_000,
+      );
+
+      expect(warn).toHaveBeenCalled();
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('secret-api-token');
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('short-lived-password');
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });

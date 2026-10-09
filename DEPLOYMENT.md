@@ -67,6 +67,21 @@ Configure these repository settings before starting it:
 
 Configure the TURN secrets directly on the deployed Worker once using Wrangler or the Cloudflare dashboard. The GitHub workflow never builds them into the browser app.
 
+## Security headers
+
+The web Worker ships `Content-Security-Policy`, `Permissions-Policy`, `Strict-Transport-Security`,
+`X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy` (see
+[docs/security.md](./docs/security.md#web-security-headers)). They are generated at build time from
+`apps/web/vite.config.ts`; the CSP `connect-src` is derived from `VITE_DUPLEX_API_ORIGIN`, which is
+why the web build and the signaling origin must agree. After changing either, run:
+
+```bash
+pnpm e2e:production
+```
+
+This builds the production Worker output, serves it with Wrangler against a local signaling Worker,
+and fails on any missing header or CSP violation while a real two-browser call runs.
+
 ## Verify a real relay
 
 Normal `pnpm e2e` uses local signaling and fake browser devices. It does not require a TURN key and may connect directly.

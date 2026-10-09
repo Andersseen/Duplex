@@ -4,20 +4,25 @@
   "private": true,
   "type": "module",
   "description": "Framework-independent wire contracts shared by every Duplex app.",
-  "sideEffects": false,
+  "sideEffects": [
+    "./src/runtime.ts",
+    "./src/index.ts"
+  ],
   "exports": {
     ".": "./src/index.ts"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@duplex/config": "workspace:*",
+    "@vitest/coverage-v8": "5.0.3",
     "eslint": "^10.12.0",
     "typescript": "~6.0.3",
     "vitest": "^5.0.3"

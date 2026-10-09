@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in Duplex does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Do not report security vulnerabilities here** — see
+        [SECURITY.md](https://github.com/Andersseen/Duplex/blob/main/SECURITY.md).
+  - type: input
+    id: platform
+    attributes:
+      label: Browser and platform
+      description: Browser and version, operating system, and whether you used the native helper.
+      placeholder: Chrome 140 on macOS 15, helper from main
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Start a call
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Redact room links, pairing codes, tokens and TURN credentials before pasting.
+      render: shell

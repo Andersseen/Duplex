@@ -7,18 +7,45 @@
     'Segoe UI',
     Roboto,
     sans-serif;
-  background: #fafafa;
-  color: #18181b;
+  --dx-canvas: #fafafa;
+  --dx-surface: #ffffff;
+  --dx-line: #d4d4d8;
+  --dx-ink: #18181b;
+  --dx-muted: #52525b;
+  --dx-accent: #1d4ed8;
+  --dx-ok: #047857;
+  --dx-warn: #b45309;
+  --dx-danger: #be123c;
+  --dx-danger-bg: #be123c;
+  background: var(--dx-canvas);
+  color: var(--dx-ink);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    background: #09090b;
-    color: #fafafa;
+    --dx-canvas: #09090b;
+    --dx-surface: #18181b;
+    --dx-line: #3f3f46;
+    --dx-ink: #fafafa;
+    --dx-muted: #a1a1aa;
+    --dx-accent: #93c5fd;
+    --dx-ok: #6ee7b7;
+    --dx-warn: #fcd34d;
+    --dx-danger: #fda4af;
+    --dx-danger-bg: #9f1239;
   }
 }
 
 body {
   margin: 0;
   min-height: 100dvh;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

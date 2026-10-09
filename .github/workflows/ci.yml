@@ -10,14 +10,18 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Every job only reads the repository. Nothing in CI writes to it or to GitHub.
+permissions:
+  contents: read
+
 jobs:
   js:
     name: Format, lint, typecheck, test, build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -25,16 +29,34 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm test
+      # Runs the same tests as `pnpm test` and enforces the per-package coverage thresholds.
+      - run: pnpm test:coverage
+      - name: Coverage summary
+        if: ${{ !cancelled() }}
+        run: pnpm --silent coverage:summary >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: |
+            apps/*/coverage
+            packages/*/coverage
+          retention-days: 14
+          if-no-files-found: ignore
       - run: pnpm build
+      - name: Tauri capability and CSP guard
+        run: pnpm check:tauri
+      - name: Agentyx configuration health
+        run: pnpm exec agentyx doctor
 
   rust:
     name: Rust (Tauri helper)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -60,9 +82,9 @@ jobs:
     name: Rust (macOS helper)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
@@ -85,12 +107,23 @@ jobs:
     name: Browser E2E (Chromium)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec playwright install --with-deps chromium
+      # Call, collaboration, Assist, file transfer, user journeys, responsive and axe accessibility.
       - run: pnpm e2e
+      # The production build with its real security headers (CSP, Permissions-Policy, ...).
+      - run: pnpm e2e:production
+      - name: Upload Playwright traces
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-traces
+          path: test-results
+          retention-days: 7
+          if-no-files-found: ignore

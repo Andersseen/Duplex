@@ -1,39 +1,57 @@
 import { describe, expect, it } from 'vitest';
-import type { ComponentFixture } from '@angular/core/testing';
 import { TestBed } from '@angular/core/testing';
 import { provideRouter, Router } from '@angular/router';
 import { roomIdSchema } from '@duplex/protocol';
+import { render, screen } from '@testing-library/angular';
+import { userEvent } from '@testing-library/user-event';
 import LandingPage from './index.page';
 
-function host(fixture: ComponentFixture<unknown>): HTMLElement {
-  return fixture.nativeElement as HTMLElement;
+async function renderLanding() {
+  return render(LandingPage, {
+    providers: [provideRouter([{ path: 'r/:roomId', children: [] }])],
+  });
 }
 
 describe('LandingPage', () => {
-  it('renders the call-to-action', async () => {
-    TestBed.configureTestingModule({ providers: [provideRouter([])] });
-    const fixture = TestBed.createComponent(LandingPage);
-    await fixture.whenStable();
+  it('states what Duplex is and offers a single call-to-action', async () => {
+    await renderLanding();
 
-    const element = host(fixture);
-    expect(element.querySelector('h1')?.textContent).toContain('Start a call');
-    expect(element.querySelector('button')?.textContent.trim()).toBe('Start a call');
+    expect(screen.getByRole('heading', { level: 1, name: 'Call. Share. Help.' })).toBeVisible();
+    expect(screen.getAllByRole('button', { name: 'Start a call' })).toHaveLength(1);
+  });
+
+  it('describes capabilities, privacy and honest platform status', async () => {
+    await renderLanding();
+
+    for (const name of [
+      'What you can do',
+      'How it works',
+      'Privacy and consent',
+      'Platform status',
+    ])
+      expect(screen.getByRole('heading', { level: 2, name })).toBeInTheDocument();
+    expect(screen.getByText('macOS only — experimental')).toBeInTheDocument();
+    expect(screen.getAllByText('Not available yet', { selector: 'dd' })).toHaveLength(2);
+  });
+
+  it('links to the documentation and source', async () => {
+    await renderLanding();
+
+    expect(screen.getByRole('link', { name: 'Docs' })).toHaveAttribute(
+      'href',
+      expect.stringContaining('github.com/Andersseen/Duplex'),
+    );
+    expect(screen.getByRole('link', { name: 'GitHub' })).toBeInTheDocument();
   });
 
   it('navigates to a fresh, valid room when starting a call', async () => {
-    TestBed.configureTestingModule({
-      providers: [provideRouter([{ path: 'r/:roomId', children: [] }])],
-    });
-    const fixture = TestBed.createComponent(LandingPage);
-    await fixture.whenStable();
+    const user = userEvent.setup();
+    await renderLanding();
 
-    const button = host(fixture).querySelector('button');
-    button?.click();
-    await fixture.whenStable();
+    await user.click(screen.getByRole('button', { name: 'Start a call' }));
 
     const url = TestBed.inject(Router).url;
-    const roomId = url.replace('/r/', '');
     expect(url.startsWith('/r/')).toBe(true);
-    expect(roomIdSchema.safeParse(roomId).success).toBe(true);
+    expect(roomIdSchema.safeParse(url.replace('/r/', '')).success).toBe(true);
   });
 });

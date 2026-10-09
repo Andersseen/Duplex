@@ -1,5 +1,6 @@
-import { TestBed } from '@angular/core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render as renderComponent, screen, waitFor } from '@testing-library/angular';
+import { userEvent } from '@testing-library/user-event';
 
 interface NativeStatus {
   platform: 'macos' | 'unsupported';
@@ -54,20 +55,16 @@ async function render(initial: NativeStatus = nativeStatus()) {
   tauri.invoke.mockImplementation((command) =>
     Promise.resolve(command === 'refresh_accessibility_status' ? initial : undefined),
   );
-  const fixture = TestBed.createComponent(App);
-  await fixture.whenStable();
-  fixture.detectChanges();
-  const element = fixture.nativeElement as HTMLElement;
-  const text = (): string => element.textContent;
-  const button = (label: string): HTMLButtonElement | undefined =>
-    [...element.querySelectorAll('button')].find((candidate) =>
-      candidate.textContent.includes(label),
-    );
-  const settle = async (): Promise<void> => {
-    await fixture.whenStable();
-    fixture.detectChanges();
-  };
-  return { fixture, element, text, button, settle };
+  const view = await renderComponent(App);
+  // The initial native status arrives asynchronously from Rust.
+  await screen.findByRole('region', { name: 'Native pointer control' }).catch(() => undefined);
+  return view;
+}
+
+/** Pushes a Rust-side event and lets Angular render it. */
+async function push(name: string, payload: unknown): Promise<void> {
+  emit(name, payload);
+  await Promise.resolve();
 }
 
 const authorizedDetails = () => ({
@@ -77,6 +74,8 @@ const authorizedDetails = () => ({
   expiresAt: Date.now() + 60_000,
 });
 
+const PAIRING_LABEL = 'Paste pairing code';
+
 describe('App', () => {
   beforeEach(() => {
     tauri.invoke.mockReset();
@@ -84,78 +83,130 @@ describe('App', () => {
   });
 
   it('starts disconnected with a pairing input', async () => {
-    const { element, text } = await render();
-    expect(text()).toContain('Not connected');
-    expect(element.querySelector('textarea[aria-label="Paste pairing code"]')).not.toBeNull();
+    await render();
+
+    expect(screen.getByRole('status')).toHaveTextContent('Not connected');
+    expect(screen.getByRole('textbox', { name: PAIRING_LABEL })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Connect' })).toBeDisabled();
   });
 
   it('sends a pairing bundle to Rust, then clears the input and never displays it', async () => {
-    const { element, text, settle } = await render();
-    const input = element.querySelector<HTMLTextAreaElement>('textarea');
-    if (!input) throw new Error('Pairing input not found.');
+    const user = userEvent.setup();
+    await render();
     const token = 'test-secret-token';
     const pairingCode = `duplex-pair-v1.${token}`;
-    input.value = pairingCode;
-    input.dispatchEvent(new Event('input'));
-    await settle();
-    element.querySelector('button')?.dispatchEvent(new Event('click'));
-    await settle();
+
+    await user.type(screen.getByRole('textbox', { name: PAIRING_LABEL }), pairingCode);
+    await user.click(screen.getByRole('button', { name: 'Connect' }));
+
     expect(tauri.invoke).toHaveBeenCalledWith('connect_helper', { pairingCode });
-    expect(element.querySelector('textarea')).toBeNull();
-    expect(text()).toContain('Connecting to Duplex');
-    expect(text()).not.toContain(token);
-    emit('helper-state', { status: 'connected', details: null });
-    await settle();
-    expect(text()).not.toContain(token);
+    expect(screen.queryByRole('textbox', { name: PAIRING_LABEL })).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Connecting to Duplex');
+    await push('helper-state', { status: 'connected', details: null });
+    expect(await screen.findByText(/Waiting for control permission/)).toBeVisible();
+    expect(document.body).not.toHaveTextContent(token);
+  });
+
+  it('shows a connection failure and lets the user retry', async () => {
+    const user = userEvent.setup();
+    await render();
+    tauri.invoke.mockRejectedValueOnce(new Error('bad code'));
+
+    await user.type(screen.getByRole('textbox', { name: PAIRING_LABEL }), 'duplex-pair-v1.x');
+    await user.click(screen.getByRole('button', { name: 'Connect' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check the pairing code');
+    expect(screen.getByRole('textbox', { name: PAIRING_LABEL })).toHaveValue('');
+    // Editing the field clears the stale error.
+    await user.type(screen.getByRole('textbox', { name: PAIRING_LABEL }), 'again');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows an error message pushed from Rust', async () => {
+    await render();
+
+    await push('helper-state', { status: 'error', details: { message: 'Room closed.' } });
+    expect(await screen.findByRole('alert')).toHaveTextContent('Room closed.');
+  });
+
+  it('disconnects even when Rust reports an error', async () => {
+    const user = userEvent.setup();
+    await render();
+    await push('helper-state', { status: 'connected', details: null });
+    tauri.invoke.mockImplementation((command) =>
+      command === 'disconnect_helper'
+        ? Promise.reject(new Error('gone'))
+        : Promise.resolve(undefined),
+    );
+
+    await user.click(await screen.findByRole('button', { name: 'Disconnect' }));
+
+    expect(tauri.invoke).toHaveBeenCalledWith('disconnect_helper');
+    expect(screen.getByRole('status')).toHaveTextContent('Not connected');
+    expect(screen.getByRole('textbox', { name: PAIRING_LABEL })).toBeVisible();
   });
 
   it('shows paired-but-no-Accessibility and only prompts after the explicit button', async () => {
-    const { text, button, settle } = await render(
-      nativeStatus({ accessibility: 'not-granted', pointerReady: false }),
-    );
-    expect(text()).toContain('Enable Accessibility');
-    expect(text()).toContain('Enable Accessibility first');
-    // Rendering, focusing and re-checking never request access.
+    const user = userEvent.setup();
+    await render(nativeStatus({ accessibility: 'not-granted', pointerReady: false }));
+
+    expect(screen.getByRole('button', { name: 'Enable Accessibility' })).toBeVisible();
+    expect(screen.getByText('Enable Accessibility first')).toBeVisible();
+    // Rendering and focusing never request access.
     expect(tauri.invoke).not.toHaveBeenCalledWith('request_accessibility', undefined);
     tauri.invoke.mockImplementation((command) =>
       Promise.resolve(command === 'request_accessibility' ? nativeStatus() : undefined),
     );
-    button('Enable Accessibility')?.click();
-    await settle();
+
+    await user.click(screen.getByRole('button', { name: 'Enable Accessibility' }));
+
     expect(tauri.invoke).toHaveBeenCalledWith('request_accessibility', undefined);
-    expect(text()).toContain('Granted');
-    expect(text()).toContain('Ready');
+    expect(await screen.findByText('Granted')).toBeVisible();
+    expect(screen.getByText('Ready')).toBeVisible();
   });
 
   it('re-checks Accessibility without prompting', async () => {
-    const { button, settle } = await render(
-      nativeStatus({ accessibility: 'not-granted', pointerReady: false }),
-    );
+    const user = userEvent.setup();
+    await render(nativeStatus({ accessibility: 'not-granted', pointerReady: false }));
     tauri.invoke.mockClear();
-    button('Re-check')?.click();
-    await settle();
+
+    await user.click(screen.getByRole('button', { name: 'Re-check' }));
+
     expect(tauri.invoke).toHaveBeenCalledWith('refresh_accessibility_status', undefined);
     expect(tauri.invoke).not.toHaveBeenCalledWith('request_accessibility', undefined);
   });
 
+  it('re-checks when the window regains focus', async () => {
+    await render();
+    tauri.invoke.mockClear();
+
+    window.dispatchEvent(new Event('focus'));
+
+    await waitFor(() => {
+      expect(tauri.invoke).toHaveBeenCalledWith('refresh_accessibility_status', undefined);
+    });
+    expect(tauri.invoke).not.toHaveBeenCalledWith('request_accessibility', undefined);
+  });
+
   it('shows a lone display as the selected target and pointer as ready', async () => {
-    const { element, text } = await render();
-    expect(text()).toContain('Display 1 — 2560 × 1440');
-    expect(element.querySelector<HTMLInputElement>('input[type="radio"]')?.checked).toBe(true);
-    expect(text()).toContain('Ready');
+    await render();
+
+    expect(screen.getByRole('radio', { name: /Display 1 — 2560 × 1440/ })).toBeChecked();
+    expect(screen.getByText('Ready')).toBeVisible();
   });
 
   it('requires an explicit choice among several displays before pointer is ready', async () => {
-    const { element, text, settle } = await render(
+    const user = userEvent.setup();
+    await render(
       nativeStatus({
         displays: [display(1), display(2)],
         selectedDisplayId: null,
         pointerReady: false,
       }),
     );
-    expect(text()).toContain('Choose the display your peer may control.');
-    expect(text()).toContain('Choose a display');
-    expect([...element.querySelectorAll<HTMLInputElement>('input[type="radio"]')]).toHaveLength(2);
+    expect(screen.getByText('Choose the display your peer may control.')).toBeVisible();
+    expect(screen.getByText('Choose a display')).toBeVisible();
+    expect(screen.getAllByRole('radio')).toHaveLength(2);
     tauri.invoke.mockImplementation((command) =>
       Promise.resolve(
         command === 'select_display'
@@ -167,18 +218,22 @@ describe('App', () => {
           : undefined,
       ),
     );
-    const second = element.querySelectorAll<HTMLInputElement>('input[type="radio"]')[1];
-    second?.dispatchEvent(new Event('change'));
-    await settle();
+
+    await user.click(screen.getByRole('radio', { name: /Display 2/ }));
+
     expect(tauri.invoke).toHaveBeenCalledWith('select_display', { displayId: 2 });
-    expect(text()).toContain('Ready');
-    expect(element.querySelectorAll<HTMLInputElement>('input[type="radio"]')[1]?.checked).toBe(
-      true,
-    );
+    expect(await screen.findByText('Ready')).toBeVisible();
+    expect(screen.getByRole('radio', { name: /Display 2/ })).toBeChecked();
+  });
+
+  it('reports no active display', async () => {
+    await render(nativeStatus({ displays: [], selectedDisplayId: null, pointerReady: false }));
+
+    expect(screen.getByText('No active display found.')).toBeVisible();
   });
 
   it('explains that native control is macOS-only elsewhere while pairing still works', async () => {
-    const { element, text } = await render(
+    await render(
       nativeStatus({
         platform: 'unsupported',
         accessibility: 'unsupported',
@@ -187,65 +242,122 @@ describe('App', () => {
         pointerReady: false,
       }),
     );
-    expect(text()).toContain('available on macOS only');
-    expect(text()).toContain('Pairing still works');
-    expect(text()).not.toContain('Enable Accessibility');
-    expect(element.querySelector('textarea[aria-label="Paste pairing code"]')).not.toBeNull();
+
+    expect(screen.getByText(/available on macOS only/)).toBeVisible();
+    expect(screen.getByText(/Pairing still works/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Enable Accessibility' })).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: PAIRING_LABEL })).toBeVisible();
   });
 
   it('never presents keyboard control as available', async () => {
-    const { text, settle } = await render();
-    expect(text()).toContain('Keyboard control');
-    expect(text()).toContain('Not implemented yet');
-    emit('helper-state', {
+    await render();
+    expect(screen.getByText('Keyboard control')).toBeVisible();
+    expect(screen.getByText('Not implemented yet')).toBeVisible();
+
+    await push('helper-state', {
       status: 'authorized',
       details: { ...authorizedDetails(), scopes: ['pointer', 'keyboard'] },
     });
-    await settle();
-    expect(text()).toContain('Pointer');
-    expect(text()).not.toContain('pointer · keyboard');
+
+    const session = await screen.findByRole('region', { name: 'Authorized control session' });
+    expect(session).toHaveTextContent('Pointer');
+    expect(session).not.toHaveTextContent(/keyboard/i);
+  });
+
+  it('does not claim a scope the helper cannot execute', async () => {
+    await render();
+
+    await push('helper-state', {
+      status: 'authorized',
+      details: { ...authorizedDetails(), scopes: ['keyboard'] },
+    });
+
+    expect(await screen.findByText('No supported scope')).toBeVisible();
   });
 
   it('shows an authorized pointer session with Stop control, then returns to waiting when revoked', async () => {
-    const { text, settle } = await render(nativeStatus({ sessionActive: true }));
-    emit('helper-state', { status: 'authorized', details: authorizedDetails() });
-    await settle();
-    expect(text()).toContain('Peer may control this Mac');
-    expect(text()).toContain('Stop control');
-    expect(text()).toContain('In use');
-    emit('helper-state', { status: 'connected', details: null });
-    emit('native-state', nativeStatus());
-    await settle();
-    expect(text()).toContain('Waiting for control permission');
-    expect(text()).not.toContain('Stop control');
-    expect(text()).toContain('Ready');
+    await render(nativeStatus({ sessionActive: true }));
+
+    await push('helper-state', { status: 'authorized', details: authorizedDetails() });
+
+    expect(await screen.findByText('Peer may control this Mac', { selector: 'h2' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Stop control' })).toBeVisible();
+    expect(screen.getByText('In use')).toBeVisible();
+
+    await push('helper-state', { status: 'connected', details: null });
+    await push('native-state', nativeStatus());
+
+    expect(await screen.findByText(/Waiting for control permission/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: 'Stop control' })).not.toBeInTheDocument();
+    expect(screen.getByText('Ready')).toBeVisible();
+  });
+
+  it('counts the session expiry down and stops at zero', async () => {
+    vi.useFakeTimers();
+    try {
+      await render();
+      const details = { ...authorizedDetails(), expiresAt: Date.now() + 61_000 };
+      emit('helper-state', { status: 'authorized', details });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await screen.findByText('Expires in 1:01')).toBeVisible();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await screen.findByText('Expires in 0:59')).toBeVisible();
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(await screen.findByText('Expires in 0:00')).toBeVisible();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stops control locally without disconnecting the helper', async () => {
-    const { text, button, settle } = await render();
-    emit('helper-state', { status: 'authorized', details: authorizedDetails() });
-    await settle();
+    const user = userEvent.setup();
+    await render();
+    await push('helper-state', { status: 'authorized', details: authorizedDetails() });
     tauri.invoke.mockImplementation((command) =>
       Promise.resolve(command === 'stop_control' ? nativeStatus() : undefined),
     );
-    button('Stop control')?.click();
-    await settle();
+
+    await user.click(await screen.findByRole('button', { name: 'Stop control' }));
+
     expect(tauri.invoke).toHaveBeenCalledWith('stop_control', undefined);
     expect(tauri.invoke).not.toHaveBeenCalledWith('disconnect_helper', undefined);
-    expect(text()).not.toContain('Peer may control this Mac');
-    expect(text()).toContain('Connected to Duplex call');
-    expect(button('Disconnect')).toBeDefined();
+    expect(
+      screen.queryByText('Peer may control this Mac', { selector: 'h2' }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Connected to Duplex call');
+    expect(screen.getByRole('button', { name: 'Disconnect' })).toBeVisible();
+  });
+
+  it('keeps the previous native state when a command fails', async () => {
+    const user = userEvent.setup();
+    await render(nativeStatus({ accessibility: 'not-granted', pointerReady: false }));
+    tauri.invoke.mockRejectedValue(new Error('denied'));
+
+    await user.click(screen.getByRole('button', { name: 'Re-check' }));
+
+    expect(screen.getByText('Enable Accessibility first')).toBeVisible();
   });
 
   it('reflects capability loss pushed from Rust', async () => {
-    const { text, settle } = await render();
-    expect(text()).toContain('Ready');
-    emit(
+    await render();
+    expect(screen.getByText('Ready')).toBeVisible();
+
+    await push(
       'native-state',
       nativeStatus({ accessibility: 'not-granted', pointerReady: false, sessionActive: false }),
     );
-    await settle();
-    expect(text()).toContain('Enable Accessibility first');
-    expect(text()).not.toContain('Ready');
+
+    expect(await screen.findByText('Enable Accessibility first')).toBeVisible();
+    expect(screen.queryByText('Ready')).not.toBeInTheDocument();
+  });
+
+  it('releases its Rust event listeners on destroy', async () => {
+    const { fixture } = await render();
+
+    expect(() => {
+      fixture.destroy();
+    }).not.toThrow();
   });
 });
