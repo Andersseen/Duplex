@@ -10,7 +10,8 @@
     "deploy": "node ../../scripts/deploy-worker.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@duplex/protocol": "workspace:*",
@@ -21,6 +22,7 @@
     "@cloudflare/vitest-plugin": "^1.3.7",
     "@cloudflare/workers-types": "^5.20261007.1",
     "@duplex/config": "workspace:*",
+    "@vitest/coverage-istanbul": "4.1.11",
     "eslint": "^10.12.0",
     "typescript": "~6.0.3",
     "vitest": "^4.1.0",

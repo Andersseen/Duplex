@@ -1,7 +1,10 @@
 {
   "$schema": "./node_modules/@angular/cli/lib/config/schema.json",
   "version": 1,
-  "cli": { "packageManager": "pnpm", "analytics": false },
+  "cli": {
+    "packageManager": "pnpm",
+    "analytics": false
+  },
   "projects": {
     "helper": {
       "projectType": "application",
@@ -14,34 +17,78 @@
           "options": {
             "browser": "src/main.ts",
             "tsConfig": "tsconfig.app.json",
-            "outputPath": { "base": "dist", "browser": "." },
-            "assets": [{ "glob": "**/*", "input": "public" }],
+            "outputPath": {
+              "base": "dist",
+              "browser": "."
+            },
+            "assets": [
+              {
+                "glob": "**/*",
+                "input": "public"
+              }
+            ],
             "styles": ["src/styles.css"]
           },
           "configurations": {
             "production": {
               "budgets": [
-                { "type": "initial", "maximumWarning": "500kB", "maximumError": "1MB" },
-                { "type": "anyComponentStyle", "maximumWarning": "4kB", "maximumError": "8kB" }
+                {
+                  "type": "initial",
+                  "maximumWarning": "500kB",
+                  "maximumError": "1MB"
+                },
+                {
+                  "type": "anyComponentStyle",
+                  "maximumWarning": "4kB",
+                  "maximumError": "8kB"
+                }
               ],
               "outputHashing": "all"
             },
-            "development": { "optimization": false, "extractLicenses": false, "sourceMap": true }
+            "development": {
+              "optimization": false,
+              "extractLicenses": false,
+              "sourceMap": true
+            }
           },
           "defaultConfiguration": "production"
         },
         "serve": {
           "builder": "@angular/build:dev-server",
-          "options": { "port": 4200, "host": "localhost" },
+          "options": {
+            "port": 4200,
+            "host": "localhost"
+          },
           "configurations": {
-            "production": { "buildTarget": "helper:build:production" },
-            "development": { "buildTarget": "helper:build:development" }
+            "production": {
+              "buildTarget": "helper:build:production"
+            },
+            "development": {
+              "buildTarget": "helper:build:development"
+            }
           },
           "defaultConfiguration": "development"
         },
         "test": {
           "builder": "@angular/build:unit-test",
-          "options": { "tsConfig": "tsconfig.spec.json" }
+          "options": {
+            "tsConfig": "tsconfig.spec.json",
+            "setupFiles": ["src/test-setup.ts"]
+          },
+          "configurations": {
+            "coverage": {
+              "coverage": true,
+              "coverageInclude": ["src/app/**/*.ts"],
+              "coverageExclude": ["src/**/*.spec.ts", "src/app/app.config.ts"],
+              "coverageReporters": ["text", "json-summary", "lcov", "html"],
+              "coverageThresholds": {
+                "statements": 90,
+                "lines": 90,
+                "functions": 85,
+                "branches": 80
+              }
+            }
+          }
         }
       }
     }
