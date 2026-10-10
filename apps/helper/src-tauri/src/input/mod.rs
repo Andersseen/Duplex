@@ -223,7 +223,10 @@ enum Op {
         delta_x: f64,
         delta_y: f64,
     },
-    Keyboard { code: String, down: bool },
+    Keyboard {
+        code: String,
+        down: bool,
+    },
 }
 
 struct Queued {
@@ -524,7 +527,13 @@ impl NativeInput {
                 state: crate::protocol::WireState::Up,
                 ..
             }
-        ) || matches!(input, InputEvent::Keyboard { state: WireState::Up, .. });
+        ) || matches!(
+            input,
+            InputEvent::Keyboard {
+                state: WireState::Up,
+                ..
+            }
+        );
         if !is_release && !Self::within_rate(state, now) {
             return Err(Denied::RateLimited);
         }
@@ -549,7 +558,8 @@ impl NativeInput {
                 delta_y: *delta_y,
             },
             InputEvent::Keyboard { code, state, .. } => Op::Keyboard {
-                code: code.clone(), down: *state == WireState::Down,
+                code: code.clone(),
+                down: *state == WireState::Down,
             },
         };
         let queued = Queued {
@@ -874,7 +884,9 @@ impl NativeInput {
 }
 
 fn shortcut_is_allowed(pressed: &[String], code: &str) -> bool {
-    let command = pressed.iter().any(|key| matches!(key.as_str(), "MetaLeft" | "MetaRight"));
+    let command = pressed
+        .iter()
+        .any(|key| matches!(key.as_str(), "MetaLeft" | "MetaRight"));
     let control = pressed
         .iter()
         .any(|key| matches!(key.as_str(), "ControlLeft" | "ControlRight"));

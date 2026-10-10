@@ -154,7 +154,10 @@ fn is_move(call: &Call, kind: MouseEventKind) -> bool {
 #[test]
 fn pointer_capability_requires_accessibility_and_a_display() {
     let granted = Rig::ready();
-    assert_eq!(granted.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
+    assert_eq!(
+        granted.input.available_scopes(NOW),
+        vec!["pointer", "keyboard"]
+    );
     let status = granted.input.status(NOW);
     assert!(status.pointer_ready && status.keyboard_available);
 
@@ -175,7 +178,10 @@ fn pointer_capability_requires_accessibility_and_a_display() {
 #[test]
 fn keyboard_capability_is_independent_but_requires_accessibility_and_a_display() {
     let ready = Rig::ready();
-    assert_eq!(ready.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
+    assert_eq!(
+        ready.input.available_scopes(NOW),
+        vec!["pointer", "keyboard"]
+    );
 
     let no_access = Rig::new(PermissionState::NotGranted, vec![main_display()]);
     assert!(!no_access.input.status(NOW).keyboard_available);
@@ -219,7 +225,10 @@ fn a_single_display_is_selected_but_several_require_an_explicit_choice() {
     let status = multi.input.select_display(2, NOW).unwrap();
     assert_eq!(status.selected_display_id, Some(2));
     assert!(status.pointer_ready);
-    assert_eq!(multi.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
+    assert_eq!(
+        multi.input.available_scopes(NOW),
+        vec!["pointer", "keyboard"]
+    );
 }
 
 #[test]
@@ -358,7 +367,7 @@ fn a_drag_sends_drag_events_between_down_and_up() {
         .iter()
         .map(|call| match call {
             Call::Move(kind, ..) | Call::Button(kind, ..) => *kind,
-            Call::Scroll(..) => unreachable!(),
+            Call::Scroll(..) | Call::Keyboard(..) => unreachable!(),
         })
         .collect();
     assert_eq!(
@@ -454,7 +463,10 @@ fn rejects_a_session_without_the_pointer_scope() {
 fn keyboard_input_requires_its_own_scope_and_posts_supported_keys() {
     let rig = Rig::ready();
     rig.grant(true, NOW + 60_000);
-    assert_eq!(rig.send(&rig.key("KeyA", "down")), Err(Denied::ScopeMissing));
+    assert_eq!(
+        rig.send(&rig.key("KeyA", "down")),
+        Err(Denied::ScopeMissing)
+    );
 
     rig.grant_scopes(false, true, NOW + 60_000);
     rig.send(&rig.key("KeyA", "down")).unwrap();
@@ -462,7 +474,10 @@ fn keyboard_input_requires_its_own_scope_and_posts_supported_keys() {
     rig.run();
     assert_eq!(
         rig.backend.calls(),
-        vec![Call::Keyboard("KeyA".into(), true), Call::Keyboard("KeyA".into(), false)]
+        vec![
+            Call::Keyboard("KeyA".into(), true),
+            Call::Keyboard("KeyA".into(), false)
+        ]
     );
 }
 
@@ -473,6 +488,7 @@ fn command_shortcuts_are_limited_and_held_keys_release_on_revoke() {
     rig.send(&rig.key("MetaLeft", "down")).unwrap();
     rig.send(&rig.key("KeyQ", "down")).unwrap();
     rig.send(&rig.key("KeyA", "down")).unwrap();
+    rig.run();
     rig.input.end_matching_session(SESSION, EndCause::Revoked);
     assert_eq!(
         rig.backend.calls(),

@@ -205,14 +205,44 @@ impl InputEvent {
 }
 
 pub fn supported_key_code(code: &str) -> bool {
-    matches!(code,
-        "Space" | "Enter" | "Backspace" | "Delete" | "Tab" | "ArrowUp" | "ArrowDown" |
-        "ArrowLeft" | "ArrowRight" | "Home" | "End" | "Comma" | "Period" | "Slash" |
-        "Semicolon" | "Quote" | "BracketLeft" | "BracketRight" | "Backslash" | "Minus" |
-        "Equal" | "Backquote" | "ShiftLeft" | "ShiftRight" | "ControlLeft" | "ControlRight" |
-        "AltLeft" | "AltRight" | "MetaLeft" | "MetaRight") ||
-        (code.strip_prefix("Key").is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase())) ||
-        (code.strip_prefix("Digit").is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_digit()))
+    matches!(
+        code,
+        "Space"
+            | "Enter"
+            | "Backspace"
+            | "Delete"
+            | "Tab"
+            | "ArrowUp"
+            | "ArrowDown"
+            | "ArrowLeft"
+            | "ArrowRight"
+            | "Home"
+            | "End"
+            | "Comma"
+            | "Period"
+            | "Slash"
+            | "Semicolon"
+            | "Quote"
+            | "BracketLeft"
+            | "BracketRight"
+            | "Backslash"
+            | "Minus"
+            | "Equal"
+            | "Backquote"
+            | "ShiftLeft"
+            | "ShiftRight"
+            | "ControlLeft"
+            | "ControlRight"
+            | "AltLeft"
+            | "AltRight"
+            | "MetaLeft"
+            | "MetaRight"
+    ) || (code
+        .strip_prefix("Key")
+        .is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase()))
+        || (code
+            .strip_prefix("Digit")
+            .is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_digit()))
 }
 
 fn unit_interval(value: f64) -> bool {
