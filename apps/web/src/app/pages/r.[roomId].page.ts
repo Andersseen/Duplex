@@ -11,7 +11,7 @@ import {
 } from '@angular/core';
 import type { ElementRef, OnDestroy } from '@angular/core';
 import { RouterLink } from '@angular/router';
-import { roomIdSchema } from '@duplex/protocol';
+import { inputKeyboardSchema, roomIdSchema } from '@duplex/protocol';
 import { CallSessionService } from '../services/call-session.service';
 import { clientToNormalized, containedVideoRect } from '../collaboration/screen-geometry';
 import type { NormalizedPoint } from '../services/collaboration.service';
@@ -37,7 +37,7 @@ import type { StatusTone } from '../ui/status-badge';
   ],
   providers: [CallSessionService],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  host: { class: 'flex min-h-dvh flex-col' },
+  host: { class: 'flex min-h-dvh flex-col', '(window:blur)': 'onWindowBlur()' },
   template: `
     <header class="flex items-center justify-between gap-3 px-4 py-3 sm:px-6">
       <a routerLink="/" class="text-lg font-semibold tracking-tight">Duplex</a>
@@ -109,8 +109,13 @@ import type { StatusTone } from '../ui/status-badge';
                 class="absolute inset-0 h-full w-full touch-none"
                 [attr.viewBox]="overlayViewBox()"
                 preserveAspectRatio="none"
-                role="img"
-                aria-label="Shared screen collaboration surface"
+                role="group"
+                [attr.tabindex]="session.remoteInput.keyboardCapturing() ? 0 : null"
+                [attr.aria-label]="
+                  session.remoteInput.keyboardCapturing()
+                    ? 'Shared screen control surface. Focus this area to type on the remote Mac.'
+                    : 'Shared screen collaboration surface'
+                "
                 (pointerdown)="onSurfacePointerDown($event)"
                 (pointermove)="onSurfacePointerMove($event)"
                 (pointerup)="onSurfacePointerUp($event)"
@@ -119,6 +124,8 @@ import type { StatusTone } from '../ui/status-badge';
                 (pointerleave)="onSurfacePointerLeave()"
                 (contextmenu)="onSurfaceContextMenu($event)"
                 (wheel)="onSurfaceWheel($event)"
+                (keydown)="onSurfaceKeyDown($event)"
+                (keyup)="onSurfaceKeyUp($event)"
                 [class.cursor-crosshair]="session.remoteInput.capturing()"
               >
                 <g [attr.transform]="overlayTransform()">
@@ -473,6 +480,8 @@ export default class RoomPage implements OnDestroy {
   }
 
   protected onSurfacePointerDown(event: PointerEvent): void {
+    if (this.session.remoteInput.keyboardCapturing())
+      (event.currentTarget as SVGSVGElement).focus({ preventScroll: true });
     if (this.session.remoteInput.capturing()) {
       this.controlPointerDown(event);
       return;
@@ -551,6 +560,30 @@ export default class RoomPage implements OnDestroy {
     event.preventDefault();
     const { deltaX, deltaY } = normalizeWheelDelta(event.deltaX, event.deltaY, event.deltaMode);
     this.session.remoteInput.scroll(deltaX, deltaY);
+  }
+
+  protected onSurfaceKeyDown(event: KeyboardEvent): void {
+    if (
+      !this.session.remoteInput.keyboardCapturing() ||
+      !inputKeyboardSchema.shape.code.safeParse(event.code).success
+    )
+      return;
+    event.preventDefault();
+    this.session.remoteInput.keyboard(event.code, 'down');
+  }
+
+  protected onSurfaceKeyUp(event: KeyboardEvent): void {
+    if (
+      !this.session.remoteInput.keyboardCapturing() ||
+      !inputKeyboardSchema.shape.code.safeParse(event.code).success
+    )
+      return;
+    event.preventDefault();
+    this.session.remoteInput.keyboard(event.code, 'up');
+  }
+
+  protected onWindowBlur(): void {
+    this.session.remoteInput.releaseHeld();
   }
 
   private controlPointerDown(event: PointerEvent): void {

@@ -43,7 +43,7 @@ powerful part (remote control): temporary, scoped, and revocable by either side.
 | Screen collaboration      | Working. Pointer, laser and drawing over the shared screen.                             |
 | Assist consent flow       | Working. Request → explicit Allow → temporary scoped session, revocable by either side. |
 | Native pointer control    | **Experimental, macOS only.** Move, click, drag and scroll through the paired helper.   |
-| Keyboard control          | **Not implemented.**                                                                    |
+| Native keyboard control   | **Experimental, macOS only.** Physical keys through a separate explicit scope.          |
 | Windows / Linux control   | **Not implemented.** The helper pairs but never advertises a native capability.         |
 
 Duplex is not a TeamViewer or AnyDesk replacement: it has no unattended access, no persistent
@@ -79,15 +79,15 @@ Real TURN relay and production deployment are covered in [DEPLOYMENT.md](./DEPLO
 
 ## Platform support
 
-| Platform | Browser calling                | Native pointer control       | Native keyboard control |
-| -------- | ------------------------------ | ---------------------------- | ----------------------- |
-| macOS    | Modern Chromium-based browsers | **Supported** (experimental) | Not yet                 |
-| Windows  | Modern Chromium-based browsers | Not yet                      | Not yet                 |
-| Linux    | Modern Chromium-based browsers | Not yet                      | Not yet                 |
+| Platform | Browser calling                | Native pointer control       | Native keyboard control      |
+| -------- | ------------------------------ | ---------------------------- | ---------------------------- |
+| macOS    | Modern Chromium-based browsers | **Supported** (experimental) | **Supported** (experimental) |
+| Windows  | Modern Chromium-based browsers | Not yet                      | Not yet                      |
+| Linux    | Modern Chromium-based browsers | Not yet                      | Not yet                      |
 
-Automated tests run in Chromium. Other engines are best effort. Native pointer control needs an
-**entire monitor** share, a paired helper, macOS Accessibility permission and an explicit Allow
-(details in [docs/assist.md](./docs/assist.md)).
+Automated tests run in Chromium. Other engines are best effort. Native pointer and keyboard control
+need an **entire monitor** share, a paired helper, macOS Accessibility permission and an explicit
+Allow for each requested scope (details in [docs/assist.md](./docs/assist.md)).
 
 ## Architecture
 
@@ -183,8 +183,7 @@ e2e/               Playwright suites
 ## Roadmap
 
 Live, file transfer, collaboration, the Assist consent flow and macOS pointer control are done.
-Next is macOS keyboard control; Windows/Linux helpers and capture are later and unscheduled. See
-[docs/roadmap.md](./docs/roadmap.md).
+Windows/Linux helpers and capture are later and unscheduled. See [docs/roadmap.md](./docs/roadmap.md).
 
 ## Contributing
 

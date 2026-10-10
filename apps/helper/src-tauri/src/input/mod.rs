@@ -1,4 +1,4 @@
-//! Native pointer input.
+//! Native pointer and keyboard input.
 //!
 //! [`NativeInput`] is the only place that can turn relayed input into operating-system events. It
 //! authorizes every event itself — the controlled browser and the room are not trusted — and keeps
@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::protocol::InputEvent;
+use crate::protocol::{InputEvent, WireState};
 use geometry::{
     scroll_to_native, ButtonState, ClickTracker, DisplayTarget, MouseEventKind, PointerButton,
 };
@@ -72,10 +72,15 @@ pub trait NativePointerBackend: Send + Sync {
         click_count: i64,
     ) -> Result<(), InputError>;
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), InputError>;
+    /// Whether the backend can post physical keyboard events on this platform.
+    fn supports_keyboard(&self) -> bool {
+        false
+    }
+    fn keyboard(&self, code: &str, down: bool) -> Result<(), InputError>;
 }
 
-/// Backend for operating systems without native pointer support: pairing and the permission
-/// protocol keep working, pointer capability is simply never available.
+/// Backend for operating systems without native input support: pairing and the permission
+/// protocol keep working, native input capabilities are simply unavailable.
 #[cfg(any(not(target_os = "macos"), test))]
 pub struct UnsupportedBackend;
 
@@ -100,6 +105,9 @@ impl NativePointerBackend for UnsupportedBackend {
         Err(InputError::Failed)
     }
     fn scroll(&self, _: i32, _: i32) -> Result<(), InputError> {
+        Err(InputError::Failed)
+    }
+    fn keyboard(&self, _: &str, _: bool) -> Result<(), InputError> {
         Err(InputError::Failed)
     }
 }
@@ -135,7 +143,7 @@ pub struct NativeStatus {
     pub displays: Vec<DisplayInfo>,
     pub selected_display_id: Option<u32>,
     pub pointer_ready: bool,
-    /// Keyboard control is not implemented, so this is always false.
+    /// Whether keyboard events can currently be posted to the selected display.
     pub keyboard_available: bool,
     pub session_active: bool,
 }
@@ -191,6 +199,7 @@ pub struct SessionGrant {
     pub control_session_id: String,
     pub surface_id: String,
     pub pointer: bool,
+    pub keyboard: bool,
     pub expires_at_ms: u64,
 }
 
@@ -214,6 +223,10 @@ enum Op {
         delta_x: f64,
         delta_y: f64,
     },
+    Keyboard {
+        code: String,
+        down: bool,
+    },
 }
 
 struct Queued {
@@ -230,6 +243,7 @@ struct State {
     selection_explicit: bool,
     session: Option<ActiveSession>,
     pressed: Vec<PointerButton>,
+    pressed_keys: Vec<String>,
     last_point: Option<(f64, f64)>,
     clicks: ClickTracker,
     move_slot: Option<Queued>,
@@ -275,6 +289,7 @@ impl NativeInput {
                     selection_explicit: false,
                     session: None,
                     pressed: Vec::new(),
+                    pressed_keys: Vec::new(),
                     last_point: None,
                     clicks: ClickTracker::default(),
                     move_slot: None,
@@ -323,11 +338,15 @@ impl NativeInput {
 
     /// Safe, coarse capability: the only thing the remote peer ever learns about this machine.
     pub fn available_scopes(&self, now: u64) -> Vec<&'static str> {
-        if self.refresh(now).pointer_ready {
-            vec!["pointer"]
-        } else {
-            Vec::new()
+        let status = self.refresh(now);
+        let mut scopes = Vec::new();
+        if status.pointer_ready {
+            scopes.push("pointer");
         }
+        if status.keyboard_available {
+            scopes.push("keyboard");
+        }
+        scopes
     }
 
     pub fn refresh(&self, now: u64) -> NativeStatus {
@@ -486,7 +505,10 @@ impl NativeInput {
             self.end_session_locked(state, EndCause::Expired);
             return Err(Denied::Expired);
         }
-        if !session.grant.pointer {
+        let keyboard_event = matches!(input, InputEvent::Keyboard { .. });
+        if (keyboard_event && !session.grant.keyboard)
+            || (!keyboard_event && !session.grant.pointer)
+        {
             return Err(Denied::ScopeMissing);
         }
         let sequence = input.sequence();
@@ -503,6 +525,12 @@ impl NativeInput {
             input,
             InputEvent::PointerButton {
                 state: crate::protocol::WireState::Up,
+                ..
+            }
+        ) || matches!(
+            input,
+            InputEvent::Keyboard {
+                state: WireState::Up,
                 ..
             }
         );
@@ -528,6 +556,10 @@ impl NativeInput {
             } => Op::Scroll {
                 delta_x: *delta_x,
                 delta_y: *delta_y,
+            },
+            InputEvent::Keyboard { code, state, .. } => Op::Keyboard {
+                code: code.clone(),
+                down: *state == WireState::Down,
             },
         };
         let queued = Queued {
@@ -588,7 +620,13 @@ impl NativeInput {
         let Some(session) = state.session.as_ref() else {
             return;
         };
-        if session.grant.control_session_id != item.session_id || !session.grant.pointer {
+        if session.grant.control_session_id != item.session_id {
+            return;
+        }
+        let keyboard_event = matches!(item.op, Op::Keyboard { .. });
+        if (keyboard_event && !session.grant.keyboard)
+            || (!keyboard_event && !session.grant.pointer)
+        {
             return;
         }
         if session.grant.expires_at_ms <= now {
@@ -634,11 +672,37 @@ impl NativeInput {
                 .shared
                 .backend
                 .scroll(scroll_to_native(delta_x), scroll_to_native(delta_y)),
+            Op::Keyboard { code, down } => self.execute_key(state, &code, down),
         };
         if result == Err(InputError::AccessDenied) {
             // Do not keep retrying native posting once the OS has said no.
             state.permission = PermissionState::NotGranted;
             self.end_session_locked(state, EndCause::PermissionLost);
+        }
+    }
+
+    fn execute_key(&self, state: &mut State, code: &str, down: bool) -> Result<(), InputError> {
+        if down {
+            // Keep system/application shortcuts unavailable. Common text editing shortcuts are
+            // allowed with Command or Control, optionally with Shift; Option alone remains useful
+            // for typing alternate characters.
+            if !shortcut_is_allowed(&state.pressed_keys, code) {
+                return Ok(());
+            }
+            let result = self.shared.backend.keyboard(code, true);
+            if result.is_ok() && !state.pressed_keys.iter().any(|held| held == code) {
+                state.pressed_keys.push(code.to_owned());
+            }
+            result
+        } else {
+            if !state.pressed_keys.iter().any(|held| held == code) {
+                return Ok(());
+            }
+            let result = self.shared.backend.keyboard(code, false);
+            if result.is_ok() {
+                state.pressed_keys.retain(|held| held != code);
+            }
+            result
         }
     }
 
@@ -779,7 +843,9 @@ impl NativeInput {
             selected_display_id: state.selected_display,
             pointer_ready: state.permission == PermissionState::Granted
                 && state.selected_display.is_some(),
-            keyboard_available: false,
+            keyboard_available: backend.supports_keyboard()
+                && state.permission == PermissionState::Granted
+                && state.selected_display.is_some(),
             session_active: state.session.is_some(),
         }
     }
@@ -799,6 +865,10 @@ impl NativeInput {
     }
 
     fn release_all_locked(&self, state: &mut State) {
+        let pressed_keys = std::mem::take(&mut state.pressed_keys);
+        for code in pressed_keys.into_iter().rev() {
+            let _ = self.shared.backend.keyboard(&code, false);
+        }
         let pressed = std::mem::take(&mut state.pressed);
         let (x, y) = state.last_point.unwrap_or((0.0, 0.0));
         let click_count = state.clicks.on_up();
@@ -811,4 +881,26 @@ impl NativeInput {
         state.move_slot = None;
         state.actions.clear();
     }
+}
+
+fn shortcut_is_allowed(pressed: &[String], code: &str) -> bool {
+    let command = pressed
+        .iter()
+        .any(|key| matches!(key.as_str(), "MetaLeft" | "MetaRight"));
+    let control = pressed
+        .iter()
+        .any(|key| matches!(key.as_str(), "ControlLeft" | "ControlRight"));
+    let option = pressed
+        .iter()
+        .any(|key| matches!(key.as_str(), "AltLeft" | "AltRight"));
+    let shift = pressed
+        .iter()
+        .any(|key| matches!(key.as_str(), "ShiftLeft" | "ShiftRight"));
+    if !command && !control {
+        return true;
+    }
+    !option
+        && !(command && control)
+        && matches!(code, "KeyA" | "KeyC" | "KeyV" | "KeyX" | "KeyZ")
+        && (!shift || matches!(code, "KeyA" | "KeyZ"))
 }

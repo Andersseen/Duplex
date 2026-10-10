@@ -31,8 +31,8 @@ export interface ActiveControlSession {
   readonly role: 'controller' | 'controlled';
 }
 
-/** Scopes a native helper can execute today. Keyboard exists in the protocol but not in any helper. */
-const NATIVE_EXECUTABLE_SCOPES: readonly ControlScope[] = ['pointer'];
+/** Scopes a native helper can execute today. */
+const NATIVE_EXECUTABLE_SCOPES: readonly ControlScope[] = ['pointer', 'keyboard'];
 
 export type ControlSessionEvent = 'started' | 'ending';
 

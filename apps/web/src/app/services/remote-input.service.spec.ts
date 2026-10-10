@@ -107,7 +107,7 @@ function rig(): Rig {
   };
 }
 
-/** Make this participant the controller of the peer's pointer-capable monitor share. */
+/** Make this participant the controller of the peer's native-input-capable monitor share. */
 function startControlling(
   r: Rig,
   scopes: readonly ('pointer' | 'keyboard')[] = ['pointer'],
@@ -118,9 +118,9 @@ function startControlling(
     protocolVersion: 1,
     surfaceId: r.surfaceId,
     helperConnected: true,
-    availableScopes: ['pointer'],
+    availableScopes: ['pointer', 'keyboard'],
   });
-  r.control.requestControl(['pointer']);
+  r.control.requestControl(scopes);
   const request = JSON.parse(r.controlChannel.sent.at(-1) ?? '{}') as { requestId: string };
   const controlSessionId = crypto.randomUUID();
   r.controlChannel.receive({
@@ -136,16 +136,19 @@ function startControlling(
 }
 
 /** Make this participant the controlled side with a ready helper. */
-function startBeingControlled(r: Rig): string {
+function startBeingControlled(
+  r: Rig,
+  scopes: readonly ('pointer' | 'keyboard')[] = ['pointer'],
+): string {
   r.control.setLocalScreen(r.surfaceId, true);
   r.control.setHelperConnected(true);
-  r.control.setHelperScopes(['pointer']);
+  r.control.setHelperScopes(['pointer', 'keyboard']);
   r.controlChannel.receive({
     type: 'control-request',
     protocolVersion: 1,
     surfaceId: r.surfaceId,
     requestId: crypto.randomUUID(),
-    scopes: ['pointer'],
+    scopes,
   });
   r.control.allow();
   const session = r.control.session();
@@ -168,13 +171,27 @@ describe('RemoteInputService — controller', () => {
     expect(r.service.capturing()).toBe(false);
   });
 
-  it('sends nothing for a session that lacks the pointer scope', () => {
+  it('blocks pointer input for a keyboard-only session', () => {
     const r = rig();
     startControlling(r, ['keyboard']);
-    expect(r.control.session()).toBeNull();
+    expect(r.control.session()?.scopes).toEqual(['keyboard']);
     r.service.movePointer({ x: 0.1, y: 0.1 });
     r.scheduler.flush();
     expect(r.inputChannel.sent).toEqual([]);
+  });
+
+  it('sends keyboard only for a granted keyboard scope and releases held keys on session end', () => {
+    const r = rig();
+    startControlling(r, ['keyboard']);
+    expect(r.service.capturing()).toBe(false);
+    expect(r.service.keyboardCapturing()).toBe(true);
+    r.service.keyboard('KeyA', 'down');
+    r.service.keyboard('KeyNotSupported', 'down');
+    r.control.release();
+    expect(r.inputChannel.messages()).toMatchObject([
+      { type: 'input-keyboard', code: 'KeyA', state: 'down' },
+      { type: 'input-keyboard', code: 'KeyA', state: 'up' },
+    ]);
   });
 
   it('sends nothing when the input channel is closed or the peer lost its capability', () => {
@@ -397,6 +414,23 @@ describe('RemoteInputService — controlled', () => {
     expect(r.relayed[0]).toEqual(message);
   });
 
+  it('relays keyboard only for a keyboard-scoped session and bypasses rate limits for key-up', () => {
+    const r = rig();
+    const sessionId = startBeingControlled(r, ['keyboard']);
+    const key = {
+      type: 'input-keyboard',
+      protocolVersion: INPUT_PROTOCOL_VERSION,
+      controlSessionId: sessionId,
+      surfaceId: r.surfaceId,
+      sequence: 1,
+      code: 'KeyA',
+      state: 'down',
+    } as const;
+    r.inputChannel.receive(key);
+    r.inputChannel.receive({ ...key, sequence: 2, state: 'up' });
+    expect(r.relayed).toEqual([key, { ...key, sequence: 2, state: 'up' }]);
+  });
+
   it('drops input when there is no controlled session or the role is wrong', () => {
     const r = rig();
     r.inputChannel.receive(move(crypto.randomUUID(), r.surfaceId, 1));
@@ -482,14 +516,22 @@ describe('RemoteInputService — controlled', () => {
     expect(r.relayed).toEqual([]);
   });
 
-  it('rejects malformed, oversized, keyboard-like and non-text payloads', () => {
+  it('rejects malformed, oversized, unsupported key codes and non-text payloads', () => {
     const r = rig();
     const sessionId = startBeingControlled(r);
     const valid = move(sessionId, r.surfaceId, 1);
     r.inputChannel.receive('not json');
     r.inputChannel.receive({ ...valid, x: 2 });
     r.inputChannel.receive({ ...valid, extra: 'key' });
-    r.inputChannel.receive({ ...valid, type: 'input-key', key: 'a' });
+    r.inputChannel.receive({
+      type: 'input-keyboard',
+      protocolVersion: INPUT_PROTOCOL_VERSION,
+      controlSessionId: sessionId,
+      surfaceId: r.surfaceId,
+      sequence: 1,
+      code: 'KeyNotSupported',
+      state: 'down',
+    });
     r.inputChannel.receive(JSON.stringify(valid) + ' '.repeat(2048));
     r.inputChannel.receiveRaw(new ArrayBuffer(8));
     expect(r.relayed).toEqual([]);

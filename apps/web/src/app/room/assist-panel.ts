@@ -23,8 +23,8 @@ import { Panel } from '../ui/panel';
         <p class="mt-1 text-xs text-ink-muted">
           {{
             controlSession.role === 'controller'
-              ? 'Pointer control is live: move, click, drag and scroll over the shared screen.'
-              : 'Your peer can move and click your mouse. Keyboard control is not available.'
+              ? 'Control is live for the scopes shown above. Focus the shared screen to type.'
+              : 'Your peer can control only the scopes shown above.'
           }}
         </p>
         <div class="mt-3">
@@ -49,7 +49,9 @@ import { Panel } from '../ui/panel';
         </div>
       } @else if (session.control.canRequest()) {
         <p class="font-medium">Assist is available for this shared screen.</p>
-        <p class="mt-1 text-sm">Pointer ✓ · Keyboard — not available yet</p>
+        <p class="mt-1 text-sm">
+          Available: {{ session.control.peerAvailableScopes().join(' · ') }}
+        </p>
         <div class="mt-3">
           <dx-control-button
             [label]="session.control.state() === 'requesting' ? 'Request sent' : 'Request control'"

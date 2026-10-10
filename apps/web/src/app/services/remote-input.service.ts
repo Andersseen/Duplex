@@ -4,6 +4,7 @@ import {
   MAX_INPUT_EVENTS_PER_SECOND,
   MAX_INPUT_MESSAGE_BYTES,
   MAX_INPUT_SCROLL_DELTA,
+  inputKeyboardSchema,
   inputMessageSchema,
 } from '@duplex/protocol';
 import type { InputMessage, InputPointerButtonName } from '@duplex/protocol';
@@ -54,9 +55,9 @@ const defaultScheduler: FrameScheduler = {
 };
 
 /**
- * Native pointer input over the dedicated `duplex-input` channel.
+ * Native pointer and keyboard input over the dedicated `duplex-input` channel.
  *
- * Controller side: captures normalized pointer actions while a granted pointer session is live.
+ * Controller side: captures input only for the scopes in a live grant.
  * Controlled side: independently validates every message before handing it to the helper relay.
  */
 export class RemoteInputService {
@@ -72,6 +73,17 @@ export class RemoteInputService {
       this.control.peerSurfaceId() === session.surfaceId
     );
   });
+  /** True only while this browser may send native keyboard input to the peer helper. */
+  readonly keyboardCapturing = computed(() => {
+    const session = this.control.session();
+    return (
+      this.channelOpen() &&
+      session?.role === 'controller' &&
+      session.scopes.includes('keyboard') &&
+      this.control.peerAvailableScopes().includes('keyboard') &&
+      this.control.peerSurfaceId() === session.surfaceId
+    );
+  });
 
   private channel: DuplexDataChannel | null = null;
   private unsubscribe: (() => void) | null = null;
@@ -83,6 +95,7 @@ export class RemoteInputService {
   private pendingScroll: { deltaX: number; deltaY: number } | null = null;
   private lastPoint: NormalizedPoint = { x: 0, y: 0 };
   private readonly pressed = new Set<InputPointerButtonName>();
+  private readonly pressedKeys = new Set<string>();
   private rateWindowStart = 0;
   private rateCount = 0;
 
@@ -162,24 +175,40 @@ export class RemoteInputService {
     this.scheduleFlush();
   }
 
+  keyboard(code: string, state: 'down' | 'up'): void {
+    const session = this.activeKeyboardControllerSession();
+    if (!session || !inputKeyboardSchema.shape.code.safeParse(code).success) return;
+    if (this.send({ type: 'input-keyboard', ...this.envelope(session), code, state })) {
+      if (state === 'down') this.pressedKeys.add(code);
+      else this.pressedKeys.delete(code);
+    }
+  }
+
   /** Send `up` for every button this browser believes is held. */
   releaseHeld(): void {
-    const session = this.activeControllerSession();
+    const session = this.currentControllerSession();
     const buttons = [...this.pressed];
+    const keys = [...this.pressedKeys];
     this.pressed.clear();
+    this.pressedKeys.clear();
     this.cancelFrame();
     this.pendingMove = null;
     this.pendingScroll = null;
     if (!session) return;
-    for (const button of buttons)
-      this.send({
-        type: 'input-pointer-button',
-        ...this.envelope(session),
-        button,
-        state: 'up',
-        x: this.lastPoint.x,
-        y: this.lastPoint.y,
-      });
+    if (session.scopes.includes('pointer')) {
+      for (const button of buttons)
+        this.send({
+          type: 'input-pointer-button',
+          ...this.envelope(session),
+          button,
+          state: 'up',
+          x: this.lastPoint.x,
+          y: this.lastPoint.y,
+        });
+    }
+    if (session.scopes.includes('keyboard'))
+      for (const code of keys)
+        this.send({ type: 'input-keyboard', ...this.envelope(session), code, state: 'up' });
   }
 
   /** Last position sent; a release with no usable coordinates reuses it rather than jumping. */
@@ -193,6 +222,15 @@ export class RemoteInputService {
 
   private activeControllerSession(): ActiveControlSession | null {
     return this.capturing() ? this.control.session() : null;
+  }
+
+  private activeKeyboardControllerSession(): ActiveControlSession | null {
+    return this.keyboardCapturing() ? this.control.session() : null;
+  }
+
+  private currentControllerSession(): ActiveControlSession | null {
+    const session = this.control.session();
+    return this.channel?.state === 'open' && session?.role === 'controller' ? session : null;
   }
 
   private envelope(session: ActiveControlSession): {
@@ -238,12 +276,14 @@ export class RemoteInputService {
       this.send({ type: 'input-scroll', ...this.envelope(session), ...scroll });
   }
 
-  private send(message: InputMessage): void {
-    if (this.channel?.state !== 'open') return;
+  private send(message: InputMessage): boolean {
+    if (this.channel?.state !== 'open') return false;
     try {
       this.channel.sendText(JSON.stringify(message));
+      return true;
     } catch {
       // Input transport failures must not affect the call; the helper releases buttons on revoke.
+      return false;
     }
   }
 
@@ -265,16 +305,22 @@ export class RemoteInputService {
       session?.role !== 'controlled' ||
       input.controlSessionId !== session.controlSessionId ||
       input.surfaceId !== session.surfaceId ||
-      !session.scopes.includes('pointer') ||
+      !(input.type === 'input-keyboard'
+        ? session.scopes.includes('keyboard')
+        : session.scopes.includes('pointer')) ||
       session.expiresAt <= this.now() ||
       !this.control.helperConnected() ||
       this.control.localSurfaceId() !== session.surfaceId ||
-      !this.control.localAvailableScopes().includes('pointer') ||
+      !(input.type === 'input-keyboard'
+        ? this.control.localAvailableScopes().includes('keyboard')
+        : this.control.localAvailableScopes().includes('pointer')) ||
       input.sequence <= this.lastReceivedSequence
     )
       return;
     // Releasing a button must always get through; everything else is rate limited.
-    const isRelease = input.type === 'input-pointer-button' && input.state === 'up';
+    const isRelease =
+      (input.type === 'input-pointer-button' && input.state === 'up') ||
+      (input.type === 'input-keyboard' && input.state === 'up');
     if (!isRelease && !this.withinRate()) return;
     this.lastReceivedSequence = input.sequence;
     this.relay?.(input);
@@ -293,7 +339,7 @@ export class RemoteInputService {
   // ----- Lifecycle -------------------------------------------------------------------------
 
   private channelClosed(): void {
-    const hadSession = this.control.session()?.scopes.includes('pointer') ?? false;
+    const hadSession = (this.control.session()?.scopes.length ?? 0) > 0;
     this.detachChannel();
     this.resetState();
     if (hadSession) this.control.endSession('disconnected');
@@ -304,6 +350,7 @@ export class RemoteInputService {
     this.pendingMove = null;
     this.pendingScroll = null;
     this.pressed.clear();
+    this.pressedKeys.clear();
     this.sequence = 0;
     this.lastReceivedSequence = -1;
     this.rateWindowStart = 0;

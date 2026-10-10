@@ -195,9 +195,11 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
       </button>
     }
     @if (native(); as state) {
-      <section aria-label="Native pointer control">
+      <section aria-label="Native remote control">
         @if (state.platform === 'unsupported') {
-          <p>Native pointer control is available on macOS only. Pairing still works.</p>
+          <p>
+            Native pointer and keyboard control are available on macOS only. Pairing still works.
+          </p>
         } @else {
           <div class="row">
             <h2>Accessibility</h2>
@@ -240,7 +242,7 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
         }
         <div class="row">
           <h2>Keyboard control</h2>
-          <span class="badge">Not implemented yet</span>
+          <span class="badge">{{ keyboardLabel() }}</span>
         </div>
       </section>
     }
@@ -269,10 +271,10 @@ export class App implements OnDestroy {
     const seconds = this.remainingSeconds();
     return `${String(Math.floor(seconds / 60))}:${String(seconds % 60).padStart(2, '0')}`;
   });
-  /** Only pointer is executable; a stray keyboard scope is never presented as working. */
-  protected readonly sessionScopes = computed(() =>
-    this.session()?.scopes.includes('pointer') ? 'Pointer' : 'No supported scope',
-  );
+  protected readonly sessionScopes = computed(() => {
+    const scopes = this.session()?.scopes ?? [];
+    return scopes.length ? scopes.join(' · ') : 'No supported scope';
+  });
   protected readonly pointerLabel = computed(() => {
     const state = this.native();
     if (!state || state.platform === 'unsupported') return 'Unavailable';
@@ -280,6 +282,13 @@ export class App implements OnDestroy {
     if (state.pointerReady) return 'Ready';
     if (state.accessibility !== 'granted') return 'Enable Accessibility first';
     return 'Choose a display';
+  });
+  protected readonly keyboardLabel = computed(() => {
+    const state = this.native();
+    if (!state?.keyboardAvailable) return 'Unavailable';
+    const session = this.session();
+    if (state.sessionActive && session?.scopes.includes('keyboard')) return 'In use';
+    return 'Ready';
   });
   private unlisten: (() => void)[] = [];
   private destroyed = false;

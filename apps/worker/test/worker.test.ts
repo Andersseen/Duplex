@@ -502,9 +502,14 @@ describe('CallRoom WebSocket signaling', () => {
     );
     await expectNoMessage(helper);
 
-    // Schema-invalid and keyboard-like payloads are refused before routing.
+    // Schema-invalid and unsupported keyboard payloads are refused before routing.
     const rejected = nextMessage(peer, 'protocol error');
-    peer.send(JSON.stringify({ type: 'helper-input', input: { ...input, type: 'input-key' } }));
+    peer.send(
+      JSON.stringify({
+        type: 'helper-input',
+        input: { ...input, type: 'input-keyboard', code: 'KeyNotSupported', state: 'down' },
+      }),
+    );
     expect((await rejected).type).toBe('protocol-error');
 
     // Padding an otherwise valid envelope past the input size cap is rejected.

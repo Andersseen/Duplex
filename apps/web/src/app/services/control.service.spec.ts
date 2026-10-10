@@ -274,13 +274,13 @@ describe('ControlService', () => {
       expect(lastSent(channel)).toMatchObject({ helperConnected: true, availableScopes: [] });
     });
 
-    it('never advertises keyboard even if a helper reports it', () => {
+    it('advertises keyboard only when the helper reports it for an eligible monitor share', () => {
       const { service, channel, surfaceId } = setup();
       service.setLocalScreen(surfaceId, true);
       service.setHelperConnected(true);
       service.setHelperScopes(['pointer', 'keyboard']);
-      expect(lastSent(channel)).toMatchObject({ availableScopes: ['pointer'] });
-      expect(service.localAvailableScopes()).toEqual(['pointer']);
+      expect(lastSent(channel)).toMatchObject({ availableScopes: ['pointer', 'keyboard'] });
+      expect(service.localAvailableScopes()).toEqual(['pointer', 'keyboard']);
     });
 
     it('clears helper scopes when the helper disconnects', () => {
