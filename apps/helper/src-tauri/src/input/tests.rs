@@ -56,11 +56,16 @@ impl Rig {
     }
 
     fn grant(&self, pointer: bool, expires_at_ms: u64) {
+        self.grant_scopes(pointer, false, expires_at_ms);
+    }
+
+    fn grant_scopes(&self, pointer: bool, keyboard: bool, expires_at_ms: u64) {
         self.input.begin_session(
             SessionGrant {
                 control_session_id: SESSION.into(),
                 surface_id: SURFACE.into(),
                 pointer,
+                keyboard,
                 expires_at_ms,
             },
             NOW,
@@ -107,6 +112,10 @@ impl Rig {
         self.event(json!({"type": "input-scroll", "deltaX": dx, "deltaY": dy}))
     }
 
+    fn key(&self, code: &str, state: &str) -> InputEvent {
+        self.event(json!({"type": "input-keyboard", "code": code, "state": state}))
+    }
+
     fn send(&self, event: &InputEvent) -> Result<(), Denied> {
         self.send_at(event, NOW)
     }
@@ -145,9 +154,9 @@ fn is_move(call: &Call, kind: MouseEventKind) -> bool {
 #[test]
 fn pointer_capability_requires_accessibility_and_a_display() {
     let granted = Rig::ready();
-    assert_eq!(granted.input.available_scopes(NOW), vec!["pointer"]);
+    assert_eq!(granted.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
     let status = granted.input.status(NOW);
-    assert!(status.pointer_ready && !status.keyboard_available);
+    assert!(status.pointer_ready && status.keyboard_available);
 
     let not_granted = Rig::new(PermissionState::NotGranted, vec![main_display()]);
     assert!(not_granted.input.available_scopes(NOW).is_empty());
@@ -161,6 +170,21 @@ fn pointer_capability_requires_accessibility_and_a_display() {
         unsupported.status(NOW).accessibility,
         PermissionState::Unsupported
     );
+}
+
+#[test]
+fn keyboard_capability_is_independent_but_requires_accessibility_and_a_display() {
+    let ready = Rig::ready();
+    assert_eq!(ready.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
+
+    let no_access = Rig::new(PermissionState::NotGranted, vec![main_display()]);
+    assert!(!no_access.input.status(NOW).keyboard_available);
+
+    let no_display = Rig::new(PermissionState::Granted, vec![]);
+    assert!(!no_display.input.status(NOW).keyboard_available);
+
+    let unsupported = NativeInput::new(Arc::new(UnsupportedBackend));
+    assert!(!unsupported.status(NOW).keyboard_available);
 }
 
 #[test]
@@ -195,7 +219,7 @@ fn a_single_display_is_selected_but_several_require_an_explicit_choice() {
     let status = multi.input.select_display(2, NOW).unwrap();
     assert_eq!(status.selected_display_id, Some(2));
     assert!(status.pointer_ready);
-    assert_eq!(multi.input.available_scopes(NOW), vec!["pointer"]);
+    assert_eq!(multi.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
 }
 
 #[test]
@@ -228,8 +252,7 @@ fn an_explicit_selection_survives_a_second_display_being_added() {
 fn never_exposes_display_topology_through_the_remote_capability() {
     let rig = Rig::ready();
     // The only remote-visible value is this list of scope names.
-    assert_eq!(rig.input.available_scopes(NOW), vec!["pointer"]);
-    assert!(!rig.input.available_scopes(NOW).contains(&"keyboard"));
+    assert_eq!(rig.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
 }
 
 // ----- Mapping and event classification ---------------------------------------------------------
@@ -428,6 +451,41 @@ fn rejects_a_session_without_the_pointer_scope() {
 }
 
 #[test]
+fn keyboard_input_requires_its_own_scope_and_posts_supported_keys() {
+    let rig = Rig::ready();
+    rig.grant(true, NOW + 60_000);
+    assert_eq!(rig.send(&rig.key("KeyA", "down")), Err(Denied::ScopeMissing));
+
+    rig.grant_scopes(false, true, NOW + 60_000);
+    rig.send(&rig.key("KeyA", "down")).unwrap();
+    rig.send(&rig.key("KeyA", "up")).unwrap();
+    rig.run();
+    assert_eq!(
+        rig.backend.calls(),
+        vec![Call::Keyboard("KeyA".into(), true), Call::Keyboard("KeyA".into(), false)]
+    );
+}
+
+#[test]
+fn command_shortcuts_are_limited_and_held_keys_release_on_revoke() {
+    let rig = Rig::ready();
+    rig.grant_scopes(false, true, NOW + 60_000);
+    rig.send(&rig.key("MetaLeft", "down")).unwrap();
+    rig.send(&rig.key("KeyQ", "down")).unwrap();
+    rig.send(&rig.key("KeyA", "down")).unwrap();
+    rig.input.end_matching_session(SESSION, EndCause::Revoked);
+    assert_eq!(
+        rig.backend.calls(),
+        vec![
+            Call::Keyboard("MetaLeft".into(), true),
+            Call::Keyboard("KeyA".into(), true),
+            Call::Keyboard("KeyA".into(), false),
+            Call::Keyboard("MetaLeft".into(), false),
+        ]
+    );
+}
+
+#[test]
 fn rejects_invalid_events_even_if_constructed_directly() {
     let rig = Rig::ready();
     rig.active();
@@ -460,6 +518,7 @@ fn a_new_grant_does_not_honour_the_previous_grants_events() {
             control_session_id: OTHER.into(),
             surface_id: SURFACE.into(),
             pointer: true,
+            keyboard: false,
             expires_at_ms: NOW + 60_000,
         },
         NOW,

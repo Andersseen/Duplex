@@ -9,6 +9,7 @@ function fakeSession() {
   const control = {
     session: signal<{ role: 'controller' | 'controlled'; scopes: string[] } | null>(null),
     incomingRequest: signal<{ scopes: string[] } | null>(null),
+    peerAvailableScopes: signal<string[]>([]),
     canRequest: signal(false),
     state: signal<'idle' | 'requesting'>('idle'),
     remainingSeconds: signal(42),
@@ -39,9 +40,10 @@ describe('AssistPanel', () => {
     const user = userEvent.setup();
     const fake = fakeSession();
     fake.control.canRequest.set(true);
+    fake.control.peerAvailableScopes.set(['pointer', 'keyboard']);
     const control = await renderPanel(fake);
 
-    expect(screen.getByText(/Keyboard — not available yet/)).toBeVisible();
+    expect(screen.getByText('Available: pointer · keyboard')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Request control' }));
 
     expect(control.requestControl).toHaveBeenCalledOnce();

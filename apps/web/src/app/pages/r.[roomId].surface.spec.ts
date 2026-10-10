@@ -51,6 +51,7 @@ function fakeSession() {
     },
     remoteInput: {
       capturing: signal(false),
+      keyboardCapturing: signal(false),
       movePointer: vi.fn(),
       pointerButton: vi.fn(),
       scroll: vi.fn(),
@@ -91,7 +92,7 @@ async function renderSurface(fake: ReturnType<typeof fakeSession>) {
   Object.defineProperty(video, 'videoHeight', { value: VIDEO.height, configurable: true });
   video.getBoundingClientRect = () =>
     ({ ...VIDEO.box, right: 800, bottom: 450, x: 0, y: 0 }) as DOMRect;
-  return screen.getByRole('img', { name: 'Shared screen collaboration surface' });
+  return screen.getByRole('group', { name: 'Shared screen collaboration surface' });
 }
 
 function pointer(type: 'pointerDown' | 'pointerMove' | 'pointerUp', target: Element, init = {}) {

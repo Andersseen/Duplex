@@ -142,6 +142,7 @@ pub async fn connect_helper(
                                                 control_session_id: session.control_session_id.clone(),
                                                 surface_id: session.surface_id.clone(),
                                                 pointer: session.scopes.iter().any(|scope| scope == "pointer"),
+                                                keyboard: session.scopes.iter().any(|scope| scope == "keyboard"),
                                                 expires_at_ms: session.expires_at,
                                             },
                                             now,

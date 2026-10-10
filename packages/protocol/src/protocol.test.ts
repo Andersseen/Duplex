@@ -433,6 +433,15 @@ describe('input messages', () => {
     expect(ok(scroll)).toBe(true);
   });
 
+  it('accepts only supported physical keyboard codes with down/up states', () => {
+    const key = { type: 'input-keyboard', ...ids, code: 'KeyA', state: 'down' };
+    expect(ok(key)).toBe(true);
+    expect(ok({ ...key, code: 'ArrowLeft', state: 'up' })).toBe(true);
+    expect(ok({ ...key, code: 'KeyNotSupported' })).toBe(false);
+    expect(ok({ ...key, state: 'repeat' })).toBe(false);
+    expect(ok({ ...key, extra: true })).toBe(false);
+  });
+
   it('accepts the normalized coordinate and scroll boundaries only', () => {
     for (const [x, y] of [
       [0, 0],
@@ -472,12 +481,19 @@ describe('input messages', () => {
       expect(ok(bad), JSON.stringify(bad)).toBe(false);
   });
 
-  it('is accepted only wrapped for the helper, never as helper-originated', () => {
+  it('accepts pointer and keyboard only wrapped for the helper, never as helper-originated', () => {
+    const key = { type: 'input-keyboard', ...ids, code: 'KeyA', state: 'down' };
     expect(helperBridgeMessageSchema.safeParse({ type: 'helper-input', input: move }).success).toBe(
+      true,
+    );
+    expect(helperBridgeMessageSchema.safeParse({ type: 'helper-input', input: key }).success).toBe(
       true,
     );
     expect(
       helperOutboundMessageSchema.safeParse({ type: 'helper-input', input: move }).success,
+    ).toBe(false);
+    expect(
+      helperOutboundMessageSchema.safeParse({ type: 'helper-input', input: key }).success,
     ).toBe(false);
     expect(
       signalingMessageSchema.safeParse({ type: 'helper-input', input: { ...move, extra: 1 } })

@@ -64,8 +64,7 @@ impl From<WireState> for ButtonState {
     }
 }
 
-/// Pointer input relayed by the room. There is deliberately no keyboard variant and no generic
-/// payload: anything that is not one of these three shapes fails to deserialize.
+/// Input relayed by the room. There is deliberately no generic payload.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum InputEvent {
@@ -109,6 +108,18 @@ pub enum InputEvent {
         #[serde(rename = "deltaY")]
         delta_y: f64,
     },
+    #[serde(rename = "input-keyboard")]
+    Keyboard {
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+        #[serde(rename = "controlSessionId")]
+        control_session_id: String,
+        #[serde(rename = "surfaceId")]
+        surface_id: String,
+        sequence: u64,
+        code: String,
+        state: WireState,
+    },
 }
 
 impl InputEvent {
@@ -122,6 +133,9 @@ impl InputEvent {
             }
             | Self::Scroll {
                 control_session_id, ..
+            }
+            | Self::Keyboard {
+                control_session_id, ..
             } => control_session_id,
         }
     }
@@ -131,6 +145,7 @@ impl InputEvent {
             Self::PointerMove { surface_id, .. }
             | Self::PointerButton { surface_id, .. }
             | Self::Scroll { surface_id, .. } => surface_id,
+            Self::Keyboard { surface_id, .. } => surface_id,
         }
     }
 
@@ -139,6 +154,7 @@ impl InputEvent {
             Self::PointerMove { sequence, .. }
             | Self::PointerButton { sequence, .. }
             | Self::Scroll { sequence, .. } => *sequence,
+            Self::Keyboard { sequence, .. } => *sequence,
         }
     }
 
@@ -161,6 +177,12 @@ impl InputEvent {
                 control_session_id,
                 surface_id,
                 ..
+            }
+            | Self::Keyboard {
+                protocol_version,
+                control_session_id,
+                surface_id,
+                ..
             } => (*protocol_version, control_session_id, surface_id),
         };
         if version != INPUT_PROTOCOL_VERSION
@@ -177,8 +199,20 @@ impl InputEvent {
             Self::Scroll {
                 delta_x, delta_y, ..
             } => scroll_delta(*delta_x) && scroll_delta(*delta_y),
+            Self::Keyboard { code, .. } => supported_key_code(code),
         }
     }
+}
+
+pub fn supported_key_code(code: &str) -> bool {
+    matches!(code,
+        "Space" | "Enter" | "Backspace" | "Delete" | "Tab" | "ArrowUp" | "ArrowDown" |
+        "ArrowLeft" | "ArrowRight" | "Home" | "End" | "Comma" | "Period" | "Slash" |
+        "Semicolon" | "Quote" | "BracketLeft" | "BracketRight" | "Backslash" | "Minus" |
+        "Equal" | "Backquote" | "ShiftLeft" | "ShiftRight" | "ControlLeft" | "ControlRight" |
+        "AltLeft" | "AltRight" | "MetaLeft" | "MetaRight") ||
+        (code.strip_prefix("Key").is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase())) ||
+        (code.strip_prefix("Digit").is_some_and(|s| s.len() == 1 && s.as_bytes()[0].is_ascii_digit()))
 }
 
 fn unit_interval(value: f64) -> bool {
@@ -340,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_pointer_move_button_and_scroll_inputs() {
+    fn accepts_pointer_and_keyboard_inputs() {
         assert!(valid_input(input(
             json!({"type": "input-pointer-move", "x": 0.0, "y": 1.0})
         )));
@@ -354,6 +388,12 @@ mod tests {
         }
         assert!(valid_input(input(
             json!({"type": "input-scroll", "deltaX": -5.5, "deltaY": 2000.0})
+        )));
+        assert!(valid_input(input(
+            json!({"type": "input-keyboard", "code": "KeyA", "state": "down"})
+        )));
+        assert!(valid_input(input(
+            json!({"type": "input-keyboard", "code": "ArrowLeft", "state": "up"})
         )));
     }
 
@@ -371,6 +411,9 @@ mod tests {
         assert!(!valid_input(input(json!({
             "type": "input-pointer-button", "button": "left", "state": "click", "x": 0.5, "y": 0.5
         }))));
+        assert!(!valid_input(input(json!({
+            "type": "input-keyboard", "code": "KeyNotSupported", "state": "down"
+        }))));
         let mut wrong_version = mv(0.5, 0.5);
         wrong_version["protocolVersion"] = json!(2);
         assert!(!valid_input(wrong_version));
@@ -383,7 +426,7 @@ mod tests {
         let mut extra = mv(0.5, 0.5);
         extra["key"] = json!("a");
         assert!(!valid_input(extra));
-        // No keyboard-like or generic payload shape can deserialize at all.
+        // Unknown keyboard shapes and generic payloads are still rejected.
         for payload in [
             input(json!({"type": "input-key", "key": "a"})),
             input(json!({"type": "input-keyboard", "code": "KeyA"})),

@@ -10,6 +10,7 @@ pub enum Call {
     Move(MouseEventKind, f64, f64),
     Button(MouseEventKind, f64, f64, i64),
     Scroll(i32, i32),
+    Keyboard(String, bool),
 }
 
 pub struct FakeState {
@@ -108,5 +109,13 @@ impl NativePointerBackend for FakeBackend {
 
     fn scroll(&self, delta_x: i32, delta_y: i32) -> Result<(), InputError> {
         self.record(Call::Scroll(delta_x, delta_y))
+    }
+
+    fn supports_keyboard(&self) -> bool {
+        true
+    }
+
+    fn keyboard(&self, code: &str, down: bool) -> Result<(), InputError> {
+        self.record(Call::Keyboard(code.to_owned(), down))
     }
 }

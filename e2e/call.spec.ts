@@ -273,7 +273,7 @@ test('Assist pairs one helper, grants pointer control, and relays validated inpu
     await expect(second.getByRole('button', { name: 'Request control' })).toBeVisible({
       timeout: 10_000,
     });
-    await expect(second.getByText('Keyboard — not available yet')).toBeVisible();
+    await expect(second.getByText('Available: pointer')).toBeVisible();
     await expect(second.locator('body')).not.toContainText(pairing.token);
 
     const nextHelperMessage = (type: string): Promise<Record<string, unknown>> =>

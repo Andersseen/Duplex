@@ -57,7 +57,7 @@ async function render(initial: NativeStatus = nativeStatus()) {
   );
   const view = await renderComponent(App);
   // The initial native status arrives asynchronously from Rust.
-  await screen.findByRole('region', { name: 'Native pointer control' }).catch(() => undefined);
+  await screen.findByRole('region', { name: 'Native remote control' }).catch(() => undefined);
   return view;
 }
 
@@ -249,10 +249,10 @@ describe('App', () => {
     expect(screen.getByRole('textbox', { name: PAIRING_LABEL })).toBeVisible();
   });
 
-  it('never presents keyboard control as available', async () => {
-    await render();
+  it('shows keyboard only when the native helper reports it available and granted', async () => {
+    await render(nativeStatus({ keyboardAvailable: true, sessionActive: true }));
     expect(screen.getByText('Keyboard control')).toBeVisible();
-    expect(screen.getByText('Not implemented yet')).toBeVisible();
+    expect(screen.getByText('Ready')).toBeVisible();
 
     await push('helper-state', {
       status: 'authorized',
@@ -260,11 +260,11 @@ describe('App', () => {
     });
 
     const session = await screen.findByRole('region', { name: 'Authorized control session' });
-    expect(session).toHaveTextContent('Pointer');
-    expect(session).not.toHaveTextContent(/keyboard/i);
+    expect(session).toHaveTextContent('pointer · keyboard');
+    expect(screen.getAllByText('In use')).toHaveLength(2);
   });
 
-  it('does not claim a scope the helper cannot execute', async () => {
+  it('shows a keyboard-only grant when that is the authorized scope', async () => {
     await render();
 
     await push('helper-state', {
@@ -272,7 +272,7 @@ describe('App', () => {
       details: { ...authorizedDetails(), scopes: ['keyboard'] },
     });
 
-    expect(await screen.findByText('No supported scope')).toBeVisible();
+    expect(await screen.findByText('keyboard')).toBeVisible();
   });
 
   it('shows an authorized pointer session with Stop control, then returns to waiting when revoked', async () => {

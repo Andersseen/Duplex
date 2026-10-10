@@ -455,7 +455,7 @@ describe('CallSessionService', () => {
       service.leave();
     });
 
-    it('does not advertise keyboard even if the helper claims it', async () => {
+    it('advertises keyboard only when the helper reports that capability', async () => {
       getDisplayMedia.mockResolvedValue(stream(displayTrack('monitor')));
       const service = joinRoom();
       const socket = await joined(service, true);
@@ -465,7 +465,7 @@ describe('CallSessionService', () => {
         type: 'helper-capabilities',
         payload: { availableScopes: ['pointer', 'keyboard'] },
       });
-      expect(service.control.localAvailableScopes()).toEqual(['pointer']);
+      expect(service.control.localAvailableScopes()).toEqual(['pointer', 'keyboard']);
       service.leave();
     });
 
