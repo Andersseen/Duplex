@@ -540,6 +540,123 @@ describe('CallSessionService', () => {
       service.leave();
     });
 
+    it('relays an authorized clipboard write to the helper and answers the peer from the helper result', async () => {
+      getDisplayMedia.mockResolvedValue(stream(displayTrack('monitor')));
+      const service = joinRoom();
+      const socket = await joined(service, true);
+      await service.toggleScreenSharing();
+      socket.receive({ type: 'helper-paired', payload: {} });
+      socket.receive({
+        type: 'helper-capabilities',
+        payload: { availableScopes: ['pointer', 'clipboard'] },
+      });
+      const controlChannel = fakeChannel('duplex-control');
+      const inputChannel = fakeChannel('duplex-input');
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: controlChannel });
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: inputChannel });
+      const surfaceId = service.collaboration.localSurfaceId();
+      controlChannel.emit({
+        type: 'message',
+        data: JSON.stringify({
+          type: 'control-request',
+          protocolVersion: 1,
+          surfaceId,
+          requestId: crypto.randomUUID(),
+          scopes: ['pointer', 'clipboard'],
+        }),
+      });
+      service.control.allow(['clipboard']);
+      const session = service.control.session();
+      if (!session) throw new Error('Control was not granted.');
+      expect(session.scopes).toEqual(['clipboard']);
+      const sent = (): { type: string; [key: string]: unknown }[] =>
+        socket.sent.map((value) => JSON.parse(value) as { type: string });
+      expect(sent().find((m) => m.type === 'helper-session-authorized')).toMatchObject({
+        session: { scopes: ['clipboard'] },
+      });
+
+      const transferId = crypto.randomUUID();
+      inputChannel.emit({
+        type: 'message',
+        data: JSON.stringify({
+          type: 'clipboard-write',
+          protocolVersion: 1,
+          controlSessionId: session.controlSessionId,
+          surfaceId: session.surfaceId,
+          sequence: 1,
+          transferId,
+          text: 'hello helper',
+        }),
+      });
+      expect(sent().filter((m) => m.type === 'helper-clipboard-write')).toEqual([
+        {
+          type: 'helper-clipboard-write',
+          controlSessionId: session.controlSessionId,
+          surfaceId: session.surfaceId,
+          transferId,
+          text: 'hello helper',
+        },
+      ]);
+
+      socket.receive({
+        type: 'helper-clipboard-result',
+        payload: {
+          type: 'helper-clipboard-result',
+          controlSessionId: session.controlSessionId,
+          transferId,
+          outcome: 'ok',
+        },
+      });
+      expect(
+        inputChannel.sent.map((value) => JSON.parse(value) as { type: string; outcome?: string }),
+      ).toContainEqual(expect.objectContaining({ type: 'clipboard-status', outcome: 'delivered' }));
+      service.leave();
+    });
+
+    it('does not relay clipboard text for a pointer-only grant', async () => {
+      getDisplayMedia.mockResolvedValue(stream(displayTrack('monitor')));
+      const service = joinRoom();
+      const socket = await joined(service, true);
+      await service.toggleScreenSharing();
+      socket.receive({ type: 'helper-paired', payload: {} });
+      socket.receive({
+        type: 'helper-capabilities',
+        payload: { availableScopes: ['pointer', 'clipboard'] },
+      });
+      const controlChannel = fakeChannel('duplex-control');
+      const inputChannel = fakeChannel('duplex-input');
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: controlChannel });
+      peerHarness.created[0]?.emit({ type: 'data-channel', channel: inputChannel });
+      controlChannel.emit({
+        type: 'message',
+        data: JSON.stringify({
+          type: 'control-request',
+          protocolVersion: 1,
+          surfaceId: service.collaboration.localSurfaceId(),
+          requestId: crypto.randomUUID(),
+          scopes: ['pointer', 'clipboard'],
+        }),
+      });
+      service.control.allow();
+      const session = service.control.session();
+      if (!session) throw new Error('Control was not granted.');
+      expect(session.scopes).toEqual(['pointer']);
+      inputChannel.emit({
+        type: 'message',
+        data: JSON.stringify({
+          type: 'clipboard-write',
+          protocolVersion: 1,
+          controlSessionId: session.controlSessionId,
+          surfaceId: session.surfaceId,
+          sequence: 1,
+          transferId: crypto.randomUUID(),
+          text: 'not allowed',
+        }),
+      });
+      expect(socket.sent.some((value) => value.includes('helper-clipboard'))).toBe(false);
+      service.leave();
+    });
+
     it('turns the collaboration tool off when this browser starts controlling', async () => {
       const service = joinRoom();
       await joined(service, true);

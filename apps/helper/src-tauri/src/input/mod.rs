@@ -1,4 +1,4 @@
-//! Native pointer and keyboard input.
+//! Native pointer, keyboard and clipboard control.
 //!
 //! [`NativeInput`] is the only place that can turn relayed input into operating-system events. It
 //! authorizes every event itself — the controlled browser and the room are not trusted — and keeps
@@ -6,6 +6,7 @@
 //!
 //! Platform code lives behind [`NativePointerBackend`] so all of this is testable with a fake.
 
+mod clipboard;
 #[cfg(test)]
 mod fake;
 pub mod geometry;
@@ -13,6 +14,8 @@ pub mod geometry;
 pub mod macos;
 #[cfg(test)]
 mod tests;
+
+pub use clipboard::{ClipboardError, ClipboardOutcome};
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -77,6 +80,18 @@ pub trait NativePointerBackend: Send + Sync {
         false
     }
     fn keyboard(&self, code: &str, down: bool) -> Result<(), InputError>;
+    /// Whether this platform can read and write plain-text clipboard contents on request.
+    fn supports_clipboard(&self) -> bool {
+        false
+    }
+    /// Current plain-text clipboard, if any. Only ever called for an authorized, explicit read.
+    fn clipboard_read(&self) -> Result<String, ClipboardError> {
+        Err(ClipboardError::Unavailable)
+    }
+    /// Replace the clipboard with plain text. Only ever called for an authorized, explicit write.
+    fn clipboard_write(&self, _text: &str) -> Result<(), ClipboardError> {
+        Err(ClipboardError::Unavailable)
+    }
 }
 
 /// Backend for operating systems without native input support: pairing and the permission
@@ -145,6 +160,8 @@ pub struct NativeStatus {
     pub pointer_ready: bool,
     /// Whether keyboard events can currently be posted to the selected display.
     pub keyboard_available: bool,
+    /// Whether this platform can service explicitly authorized text clipboard operations.
+    pub clipboard_available: bool,
     pub session_active: bool,
 }
 
@@ -192,6 +209,10 @@ pub enum Denied {
     NoDisplay,
     RateLimited,
     QueueFull,
+    /// The clipboard transfer id was already used in this session.
+    Replayed,
+    /// This platform cannot service clipboard operations.
+    ClipboardUnsupported,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,7 +221,15 @@ pub struct SessionGrant {
     pub surface_id: String,
     pub pointer: bool,
     pub keyboard: bool,
+    pub clipboard: bool,
     pub expires_at_ms: u64,
+}
+
+impl SessionGrant {
+    /// Whether the grant needs Accessibility and a selected display to stay valid.
+    fn needs_input(&self) -> bool {
+        self.pointer || self.keyboard
+    }
 }
 
 struct ActiveSession {
@@ -253,6 +282,7 @@ struct State {
     last_status: Option<NativeStatus>,
     events: Vec<NativeEvent>,
     shutdown: bool,
+    clipboard: clipboard::ClipboardGuard,
 }
 
 type Listener = Arc<dyn Fn(NativeEvent) + Send + Sync>;
@@ -299,6 +329,7 @@ impl NativeInput {
                     last_status: None,
                     events: Vec::new(),
                     shutdown: false,
+                    clipboard: clipboard::ClipboardGuard::default(),
                 }),
                 wake: Condvar::new(),
                 listener: Mutex::new(None),
@@ -346,6 +377,9 @@ impl NativeInput {
         if status.keyboard_available {
             scopes.push("keyboard");
         }
+        if status.clipboard_available {
+            scopes.push("clipboard");
+        }
         scopes
     }
 
@@ -386,6 +420,7 @@ impl NativeInput {
         self.with_state(|state| {
             self.refresh_locked(state, now);
             self.end_session_locked(state, EndCause::Superseded);
+            state.clipboard = clipboard::ClipboardGuard::default();
             state.session = Some(ActiveSession {
                 grant,
                 last_sequence: None,
@@ -809,7 +844,12 @@ impl NativeInput {
             _ if !state.selection_explicit => state.selected_display = None,
             _ => {}
         }
-        if state.session.is_some() {
+        // A clipboard-only grant needs neither Accessibility nor a display.
+        if state
+            .session
+            .as_ref()
+            .is_some_and(|session| session.grant.needs_input())
+        {
             if state.permission != PermissionState::Granted {
                 self.end_session_locked(state, EndCause::PermissionLost);
             } else if selected_lost || state.selected_display.is_none() {
@@ -846,6 +886,8 @@ impl NativeInput {
             keyboard_available: backend.supports_keyboard()
                 && state.permission == PermissionState::Granted
                 && state.selected_display.is_some(),
+            // Clipboard needs no Accessibility or display: it is advertised by platform support alone.
+            clipboard_available: backend.supports_clipboard(),
             session_active: state.session.is_some(),
         }
     }

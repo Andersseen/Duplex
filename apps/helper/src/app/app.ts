@@ -8,7 +8,7 @@ type Accessibility = 'unsupported' | 'not-granted' | 'granted';
 interface SessionMetadata {
   controlSessionId: string;
   surfaceId: string;
-  scopes: readonly ('pointer' | 'keyboard')[];
+  scopes: readonly ('pointer' | 'keyboard' | 'clipboard')[];
   expiresAt: number;
 }
 interface HelperStatusEvent {
@@ -30,6 +30,7 @@ interface NativeStatus {
   selectedDisplayId: number | null;
   pointerReady: boolean;
   keyboardAvailable: boolean;
+  clipboardAvailable: boolean;
   sessionActive: boolean;
 }
 
@@ -244,6 +245,10 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
           <h2>Keyboard control</h2>
           <span class="badge">{{ keyboardLabel() }}</span>
         </div>
+        <div class="row">
+          <h2>Clipboard text</h2>
+          <span class="badge">{{ clipboardLabel() }}</span>
+        </div>
       </section>
     }
     @if (status() === 'connecting' || status() === 'connected' || status() === 'authorized') {
@@ -251,6 +256,12 @@ const STATUS_LABELS: Record<HelperStatus, string> = {
         <section aria-label="Authorized control session">
           <h2>Peer may control this Mac</h2>
           <p>{{ sessionScopes() }}</p>
+          @if (activeSession.scopes.includes('clipboard')) {
+            <p>
+              Your peer can put text on your clipboard. They can read it only when you approve each
+              request in the browser.
+            </p>
+          }
           <p>Expires in {{ expiryLabel() }}</p>
           <button type="button" class="danger" (click)="stopControl()">Stop control</button>
         </section>
@@ -288,6 +299,13 @@ export class App implements OnDestroy {
     if (!state?.keyboardAvailable) return 'Unavailable';
     const session = this.session();
     if (state.sessionActive && session?.scopes.includes('keyboard')) return 'In use';
+    return 'Ready';
+  });
+  protected readonly clipboardLabel = computed(() => {
+    const state = this.native();
+    if (!state?.clipboardAvailable) return 'Unavailable';
+    const session = this.session();
+    if (state.sessionActive && session?.scopes.includes('clipboard')) return 'In use';
     return 'Ready';
   });
   private unlisten: (() => void)[] = [];

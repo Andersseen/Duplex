@@ -5,18 +5,18 @@ layer small. There is **no Python and no pytest** in this repository.
 
 ## The pyramid
 
-| Layer                          | Tooling                                                  | Where                                                     | What it proves                                                                                     |
-| ------------------------------ | -------------------------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Protocol / schema              | Vitest                                                   | `packages/protocol`                                       | Wire contracts, limits, room IDs, pairing bundles; Zod never generates code (CSP-safe).            |
-| Framework-independent services | Vitest with fakes                                        | `packages/webrtc`, `apps/web/src/app/services`            | Perfect negotiation, ICE recovery, DataChannels, file transfer, control and input state machines.  |
-| Angular components             | Vitest + Angular Testing Library + user-event + jest-dom | `apps/web/src/app/{pages,room,ui}`, `apps/helper/src/app` | What a user sees and can do: roles, names, `aria-pressed`, dialogs, keyboard.                      |
-| Worker / Durable Object        | `@cloudflare/vitest-plugin` (real workerd)               | `apps/worker/test`                                        | Room admission, origin checks, pairing, helper routing, TURN credential handling.                  |
-| Rust helper                    | `cargo test` (+ a fake native backend)                   | `apps/helper/src-tauri`                                   | Pairing parsing, protocol validation, session/surface/scope/expiry/sequence/rate checks, release.  |
-| Browser E2E                    | Playwright (Chromium, fake media)                        | `e2e/*.spec.ts`                                           | Real calls, collaboration, Assist negotiation with a test helper socket, file bytes, journeys.     |
-| Accessibility                  | `@axe-core/playwright`                                   | `e2e/accessibility.spec.ts`                               | No serious/critical axe violations on landing, ready-to-join and a connected call, light and dark. |
-| Production headers             | Playwright against the built Worker                      | `e2e/production`                                          | The shipped CSP / Permissions-Policy allow hydration, signaling, mic, WebRTC and screen share.     |
-| Optional TURN relay            | Playwright, real Cloudflare credentials                  | `scripts/e2e-turn.mjs`                                    | Both peers select a relay candidate. Skipped without secrets.                                      |
-| Manual macOS verification      | A person with two browsers or machines                   | below                                                     | Real operating-system input.                                                                       |
+| Layer                          | Tooling                                                  | Where                                                     | What it proves                                                                                                                                                                 |
+| ------------------------------ | -------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Protocol / schema              | Vitest                                                   | `packages/protocol`                                       | Wire contracts, limits, room IDs, pairing bundles; Zod never generates code (CSP-safe).                                                                                        |
+| Framework-independent services | Vitest with fakes                                        | `packages/webrtc`, `apps/web/src/app/services`            | Perfect negotiation, ICE recovery, DataChannels, file transfer, control and input state machines.                                                                              |
+| Angular components             | Vitest + Angular Testing Library + user-event + jest-dom | `apps/web/src/app/{pages,room,ui}`, `apps/helper/src/app` | What a user sees and can do: roles, names, `aria-pressed`, dialogs, keyboard.                                                                                                  |
+| Worker / Durable Object        | `@cloudflare/vitest-plugin` (real workerd)               | `apps/worker/test`                                        | Room admission, origin checks, pairing, helper routing, TURN credential handling.                                                                                              |
+| Rust helper                    | `cargo test` (+ a fake native backend)                   | `apps/helper/src-tauri`                                   | Pairing parsing, protocol validation, session/surface/scope/expiry/sequence/rate checks, release, clipboard authorization.                                                     |
+| Browser E2E                    | Playwright (Chromium, fake media)                        | `e2e/*.spec.ts`                                           | Real calls, collaboration, Assist negotiation with a test helper socket (incl. the full clipboard consent and transfer flow in `e2e/clipboard.spec.ts`), file bytes, journeys. |
+| Accessibility                  | `@axe-core/playwright`                                   | `e2e/accessibility.spec.ts`                               | No serious/critical axe violations on landing, ready-to-join and a connected call, light and dark.                                                                             |
+| Production headers             | Playwright against the built Worker                      | `e2e/production`                                          | The shipped CSP / Permissions-Policy allow hydration, signaling, mic, WebRTC and screen share.                                                                                 |
+| Optional TURN relay            | Playwright, real Cloudflare credentials                  | `scripts/e2e-turn.mjs`                                    | Both peers select a relay candidate. Skipped without secrets.                                                                                                                  |
+| Manual macOS verification      | A person with two browsers or machines                   | below                                                     | Real operating-system input.                                                                                                                                                   |
 
 ## Commands
 
@@ -76,6 +76,17 @@ read-only. Physical input is verified by hand:
 5. From B move, click, right-click, drag and scroll over the shared screen; A's cursor should follow (confirm scroll direction on hardware).
 6. Click **Stop control** in the helper: the cursor must stop responding immediately and no button may stay held.
 7. Repeat after changing the shared screen, after revoking Accessibility, and after closing a browser mid-drag.
+
+#### Clipboard (not executed as part of the automated change set)
+
+1. Pair as above; the helper's **Clipboard text** row should read _Ready_ even before Accessibility is granted.
+2. As B, tick **Clipboard text** and request control. In A's dialog the clipboard box must be **unticked**; tick it and Allow. The helper should show the clipboard grant.
+3. Copy text on B, click **Send my clipboard text** (accept Chromium's prompt). Paste on A's Mac: the text must match exactly, including accents, emoji and newlines. A shows the character count, not the text.
+4. Copy text on A's Mac, click **Get remote clipboard text** as B. A must see **Share once / Decline** and nothing may reach B before A clicks. After Share once, click **Copy to my clipboard** on B and paste.
+5. Try text over 4 KiB and text with a control character: B must refuse it with an explanation and A's clipboard must be unchanged.
+6. Decline a read; deny the browser's clipboard prompt; stop control from the helper mid-request. Each must show an accurate message and leave A's clipboard unchanged.
+7. Grant only pointer and confirm the clipboard buttons never appear. With a non-text clipboard (an image) a read must report "no text".
+8. To exercise the real pasteboard code on the Mac running the tests: `cargo test --manifest-path apps/helper/src-tauri/Cargo.toml -- --ignored macos_clipboard_round_trip` (this **replaces your clipboard**).
 
 This checklist was not executed as part of the automated change set.
 

@@ -6,14 +6,14 @@ export const CONTROL_REQUEST_TIMEOUT_MS = 30 * 1000;
 
 const uuid = z.uuid();
 const scopes = z
-  .array(z.enum(['pointer', 'keyboard']))
+  .array(z.enum(['pointer', 'keyboard', 'clipboard']))
   .min(1)
-  .max(2)
+  .max(3)
   .refine((values) => new Set(values).size === values.length, 'Scopes must be unique.');
-export const controlScopeSchema = z.enum(['pointer', 'keyboard']);
+export const controlScopeSchema = z.enum(['pointer', 'keyboard', 'clipboard']);
 const availableScopes = z
   .array(controlScopeSchema)
-  .max(2)
+  .max(3)
   .refine((values) => new Set(values).size === values.length, 'Scopes must be unique.');
 const controlBase = {
   protocolVersion: z.literal(CONTROL_PROTOCOL_VERSION),

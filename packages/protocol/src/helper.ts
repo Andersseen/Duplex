@@ -2,6 +2,11 @@ import { z } from 'zod';
 import { roomIdSchema } from './room';
 import { inputMessageSchema } from './input';
 import { controlRevocationReasonSchema, controlScopeSchema } from './control';
+import {
+  helperClipboardReadSchema,
+  helperClipboardResultSchema,
+  helperClipboardWriteSchema,
+} from './clipboard';
 
 export const HELPER_PAIRING_PREFIX = 'duplex-pair-v1.';
 const tokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/, 'Invalid pairing credential.');
@@ -70,7 +75,7 @@ export const helperSessionMetadataSchema = z
   .object({
     controlSessionId: z.uuid(),
     surfaceId: z.uuid(),
-    scopes: z.array(controlScopeSchema).min(1).max(2),
+    scopes: z.array(controlScopeSchema).min(1).max(3),
     expiresAt: z.number().int().positive(),
   })
   .strict()
@@ -81,7 +86,7 @@ export const helperSessionMetadataSchema = z
 
 const helperScopesSchema = z
   .array(controlScopeSchema)
-  .max(2)
+  .max(3)
   .refine((values) => new Set(values).size === values.length, 'Scopes must be unique.');
 
 /** Messages the native helper sends to the room. Only safe, coarse control-plane state. */
@@ -91,6 +96,7 @@ export const helperOutboundMessageSchema = z.discriminatedUnion('type', [
     .object({ type: z.literal('helper-capabilities'), availableScopes: helperScopesSchema })
     .strict(),
   z.object({ type: z.literal('helper-stop-control'), controlSessionId: z.uuid() }).strict(),
+  helperClipboardResultSchema,
 ]);
 export type HelperOutboundMessage = z.infer<typeof helperOutboundMessageSchema>;
 
@@ -108,5 +114,7 @@ export const helperBridgeMessageSchema = z.discriminatedUnion('type', [
     })
     .strict(),
   z.object({ type: z.literal('helper-input'), input: inputMessageSchema }).strict(),
+  helperClipboardWriteSchema,
+  helperClipboardReadSchema,
 ]);
 export type HelperBridgeMessage = z.infer<typeof helperBridgeMessageSchema>;

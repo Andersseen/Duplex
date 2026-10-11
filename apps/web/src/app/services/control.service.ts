@@ -32,7 +32,7 @@ export interface ActiveControlSession {
 }
 
 /** Scopes a native helper can execute today. */
-const NATIVE_EXECUTABLE_SCOPES: readonly ControlScope[] = ['pointer', 'keyboard'];
+const NATIVE_EXECUTABLE_SCOPES: readonly ControlScope[] = ['pointer', 'keyboard', 'clipboard'];
 
 export type ControlSessionEvent = 'started' | 'ending';
 
@@ -173,7 +173,15 @@ export class ControlService {
     this.reconcileLocalCapability();
   }
 
-  requestControl(scopes: readonly ControlScope[] = this.peerAvailableScopes()): void {
+  /**
+   * Ask the peer for control. With no argument this requests pointer and keyboard only: the
+   * clipboard scope must always be named explicitly, so it is never requested by default.
+   */
+  requestControl(
+    scopes: readonly ControlScope[] = this.peerAvailableScopes().filter(
+      (scope) => scope !== 'clipboard',
+    ),
+  ): void {
     if (
       !this.canRequest() ||
       !this.peerScreenId ||
@@ -224,7 +232,10 @@ export class ControlService {
       !this.helperConnected()
     )
       return;
-    const grantedScopes = (scopes ?? request.scopes).filter(
+    // Without an explicit choice the clipboard is never granted: it needs its own opt-in.
+    const grantedScopes = (
+      scopes ?? request.scopes.filter((scope) => scope !== 'clipboard')
+    ).filter(
       (scope) => request.scopes.includes(scope) && this.localAvailableScopes().includes(scope),
     );
     if (!grantedScopes.length) {

@@ -7,6 +7,10 @@ use crate::input::{MAX_SCROLL_DELTA, MAX_SEQUENCE};
 pub const INPUT_PROTOCOL_VERSION: u8 = 1;
 /// Upper bound on any text frame accepted from the room.
 pub const MAX_BRIDGE_MESSAGE_BYTES: usize = 4096;
+/// Largest clipboard text, in UTF-8 bytes. Mirrors `MAX_CLIPBOARD_TEXT_BYTES` in the shared protocol.
+pub const MAX_CLIPBOARD_TEXT_BYTES: usize = 4096;
+/// Only clipboard frames may exceed [`MAX_BRIDGE_MESSAGE_BYTES`], up to this bound.
+pub const MAX_CLIPBOARD_BRIDGE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -268,14 +272,101 @@ pub enum BridgeMessage {
     },
     #[serde(rename = "helper-input")]
     Input { input: InputEvent },
+    #[serde(rename = "helper-clipboard-write")]
+    ClipboardWrite {
+        #[serde(rename = "controlSessionId")]
+        control_session_id: String,
+        #[serde(rename = "surfaceId")]
+        surface_id: String,
+        #[serde(rename = "transferId")]
+        transfer_id: String,
+        text: String,
+    },
+    #[serde(rename = "helper-clipboard-read")]
+    ClipboardRead {
+        #[serde(rename = "controlSessionId")]
+        control_session_id: String,
+        #[serde(rename = "surfaceId")]
+        surface_id: String,
+        #[serde(rename = "transferId")]
+        transfer_id: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardOp {
+    Write(String),
+    Read,
+}
+
+/// One explicit clipboard operation relayed by the room. There is no generic payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardRequest {
+    pub control_session_id: String,
+    pub surface_id: String,
+    pub transfer_id: String,
+    pub op: ClipboardOp,
+}
+
+impl ClipboardRequest {
+    pub fn is_valid(&self) -> bool {
+        valid_uuid(&self.control_session_id)
+            && valid_uuid(&self.surface_id)
+            && valid_uuid(&self.transfer_id)
+            && match &self.op {
+                ClipboardOp::Write(text) => acceptable_clipboard_text(text),
+                ClipboardOp::Read => true,
+            }
+    }
+}
+
+/// Non-empty, within the byte bound, and free of control characters other than tab, CR and LF.
+/// Mirrors `isAcceptableClipboardText` in the shared protocol.
+pub fn acceptable_clipboard_text(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= MAX_CLIPBOARD_TEXT_BYTES
+        && !text
+            .chars()
+            .any(|c| (c < ' ' && !matches!(c, '\t' | '\n' | '\r')) || c == '\u{7f}')
 }
 
 impl BridgeMessage {
     pub fn parse(text: &str) -> Option<Self> {
-        if text.len() > MAX_BRIDGE_MESSAGE_BYTES {
+        if text.len() > MAX_CLIPBOARD_BRIDGE_BYTES {
             return None;
         }
-        serde_json::from_str::<Self>(text).ok()
+        let message = serde_json::from_str::<Self>(text).ok()?;
+        // Only clipboard frames may be larger than an ordinary control-plane frame.
+        (text.len() <= MAX_BRIDGE_MESSAGE_BYTES || message.clipboard_request().is_some())
+            .then_some(message)
+    }
+
+    /// The clipboard operation this message asks for, if it is one.
+    pub fn clipboard_request(&self) -> Option<ClipboardRequest> {
+        match self {
+            Self::ClipboardWrite {
+                control_session_id,
+                surface_id,
+                transfer_id,
+                text,
+            } => Some(ClipboardRequest {
+                control_session_id: control_session_id.clone(),
+                surface_id: surface_id.clone(),
+                transfer_id: transfer_id.clone(),
+                op: ClipboardOp::Write(text.clone()),
+            }),
+            Self::ClipboardRead {
+                control_session_id,
+                surface_id,
+                transfer_id,
+            } => Some(ClipboardRequest {
+                control_session_id: control_session_id.clone(),
+                surface_id: surface_id.clone(),
+                transfer_id: transfer_id.clone(),
+                op: ClipboardOp::Read,
+            }),
+            _ => None,
+        }
     }
 
     /// Structural validation that serde alone cannot express. `now_ms` is the wall clock.
@@ -285,12 +376,12 @@ impl BridgeMessage {
                 valid_uuid(&session.control_session_id)
                     && valid_uuid(&session.surface_id)
                     && !session.scopes.is_empty()
-                    && session.scopes.len() <= 2
+                    && session.scopes.len() <= 3
                     && session.scopes.iter().collect::<HashSet<_>>().len() == session.scopes.len()
                     && session
                         .scopes
                         .iter()
-                        .all(|scope| matches!(scope.as_str(), "pointer" | "keyboard"))
+                        .all(|scope| matches!(scope.as_str(), "pointer" | "keyboard" | "clipboard"))
                     && session.expires_at > now_ms
                     && session.expires_at <= now_ms + 10 * 60 * 1000
             }
@@ -298,6 +389,9 @@ impl BridgeMessage {
                 control_session_id, ..
             } => valid_uuid(control_session_id),
             Self::Input { input } => input.is_valid(),
+            Self::ClipboardWrite { .. } | Self::ClipboardRead { .. } => self
+                .clipboard_request()
+                .is_some_and(|request| request.is_valid()),
         }
     }
 }
@@ -399,7 +493,13 @@ mod tests {
         assert!(!session(json!(["pointer", "pointer"]), NOW + 60_000).is_valid(NOW));
         assert!(!session(json!(["pointer"]), NOW + 11 * 60 * 1000).is_valid(NOW));
         assert!(!session(json!(["pointer"]), NOW - 1).is_valid(NOW));
-        assert!(!session(json!(["clipboard"]), NOW + 1_000).is_valid(NOW));
+        assert!(!session(json!(["screen"]), NOW + 1_000).is_valid(NOW));
+        assert!(session(json!(["clipboard"]), NOW + 1_000).is_valid(NOW));
+        assert!(!session(
+            json!(["pointer", "keyboard", "clipboard", "clipboard"]),
+            NOW + 1_000
+        )
+        .is_valid(NOW));
         assert!(!session(json!([]), NOW + 1_000).is_valid(NOW));
     }
 
@@ -475,5 +575,94 @@ mod tests {
             " ".repeat(MAX_BRIDGE_MESSAGE_BYTES)
         );
         assert!(BridgeMessage::parse(&padded).is_none());
+    }
+
+    const TRANSFER: &str = "123e4567-e89b-12d3-a456-4266141740aa";
+
+    fn clipboard_write(text: &str) -> Value {
+        json!({
+            "type": "helper-clipboard-write",
+            "controlSessionId": SESSION,
+            "surfaceId": SURFACE,
+            "transferId": TRANSFER,
+            "text": text
+        })
+    }
+
+    #[test]
+    fn accepts_clipboard_write_and_read_shapes() {
+        let write = parse(clipboard_write("hello\nworld\t!")).unwrap();
+        assert!(write.is_valid(NOW));
+        let request = write.clipboard_request().unwrap();
+        assert_eq!(request.op, ClipboardOp::Write("hello\nworld\t!".into()));
+        let read = parse(json!({
+            "type": "helper-clipboard-read",
+            "controlSessionId": SESSION,
+            "surfaceId": SURFACE,
+            "transferId": TRANSFER
+        }))
+        .unwrap();
+        assert!(read.is_valid(NOW));
+        assert_eq!(read.clipboard_request().unwrap().op, ClipboardOp::Read);
+        let session_revoked = parse(json!({
+            "type": "helper-session-revoked",
+            "controlSessionId": SESSION,
+            "reason": "user"
+        }))
+        .unwrap();
+        assert!(session_revoked.clipboard_request().is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_oversized_and_control_character_clipboard_messages() {
+        let mut extra = clipboard_write("x");
+        extra["extra"] = json!(true);
+        assert!(parse(extra).is_none());
+        let mut read_with_text = clipboard_write("x");
+        read_with_text["type"] = json!("helper-clipboard-read");
+        assert!(parse(read_with_text).is_none());
+
+        let invalid = |value: Value| parse(value).is_some_and(|message| !message.is_valid(NOW));
+        assert!(invalid(clipboard_write("")));
+        assert!(invalid(clipboard_write("bad\u{0}text")));
+        assert!(invalid(clipboard_write("del\u{7f}")));
+        assert!(invalid(clipboard_write(
+            &"x".repeat(MAX_CLIPBOARD_TEXT_BYTES + 1)
+        )));
+        assert!(!invalid(clipboard_write(
+            &"x".repeat(MAX_CLIPBOARD_TEXT_BYTES)
+        )));
+        let mut bad_id = clipboard_write("x");
+        bad_id["transferId"] = json!("nope");
+        assert!(invalid(bad_id));
+        // Multi-byte characters count by bytes, not characters.
+        assert!(invalid(clipboard_write(
+            &"é".repeat(MAX_CLIPBOARD_TEXT_BYTES / 2 + 1)
+        )));
+        assert!(!invalid(clipboard_write(
+            &"é".repeat(MAX_CLIPBOARD_TEXT_BYTES / 2)
+        )));
+    }
+
+    #[test]
+    fn only_clipboard_frames_may_exceed_the_control_plane_frame_bound() {
+        // A maximal clipboard write is bigger than an ordinary control frame but still accepted.
+        let full = clipboard_write(&"x".repeat(MAX_CLIPBOARD_TEXT_BYTES)).to_string();
+        assert!(full.len() > MAX_BRIDGE_MESSAGE_BYTES);
+        assert!(BridgeMessage::parse(&full).is_some());
+        // Padding any other message past the ordinary bound is rejected.
+        let padded = format!(
+            "{}{}",
+            json!({"type": "helper-session-revoked", "controlSessionId": SESSION, "reason": "user"}),
+            " ".repeat(MAX_BRIDGE_MESSAGE_BYTES)
+        );
+        assert!(BridgeMessage::parse(&padded).is_none());
+        // And nothing, clipboard included, may pass the clipboard frame bound.
+        let huge = format!(
+            "{}{}",
+            clipboard_write("x"),
+            " ".repeat(MAX_CLIPBOARD_BRIDGE_BYTES)
+        );
+        assert!(BridgeMessage::parse(&huge).is_none());
     }
 }

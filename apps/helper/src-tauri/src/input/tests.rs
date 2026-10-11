@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use super::fake::{Call, FakeBackend};
 use super::geometry::{DisplayTarget, MouseEventKind};
 use super::*;
-use crate::protocol::InputEvent;
+use crate::protocol::{ClipboardOp, ClipboardRequest, InputEvent};
 
 const SESSION: &str = "123e4567-e89b-12d3-a456-426614174000";
 const SURFACE: &str = "123e4567-e89b-12d3-a456-426614174001";
@@ -66,11 +66,26 @@ impl Rig {
                 surface_id: SURFACE.into(),
                 pointer,
                 keyboard,
+                clipboard: false,
                 expires_at_ms,
             },
             NOW,
         );
         *self.sequence.lock().unwrap() = 0;
+    }
+
+    fn grant_clipboard(&self, pointer: bool, keyboard: bool, clipboard: bool, expires_at_ms: u64) {
+        self.input.begin_session(
+            SessionGrant {
+                control_session_id: SESSION.into(),
+                surface_id: SURFACE.into(),
+                pointer,
+                keyboard,
+                clipboard,
+                expires_at_ms,
+            },
+            NOW,
+        );
     }
 
     fn active(&self) -> &Self {
@@ -156,16 +171,17 @@ fn pointer_capability_requires_accessibility_and_a_display() {
     let granted = Rig::ready();
     assert_eq!(
         granted.input.available_scopes(NOW),
-        vec!["pointer", "keyboard"]
+        vec!["pointer", "keyboard", "clipboard"]
     );
     let status = granted.input.status(NOW);
     assert!(status.pointer_ready && status.keyboard_available);
 
     let not_granted = Rig::new(PermissionState::NotGranted, vec![main_display()]);
-    assert!(not_granted.input.available_scopes(NOW).is_empty());
+    // Clipboard is a separate capability: it needs neither Accessibility nor a display.
+    assert_eq!(not_granted.input.available_scopes(NOW), vec!["clipboard"]);
 
     let no_display = Rig::new(PermissionState::Granted, vec![]);
-    assert!(no_display.input.available_scopes(NOW).is_empty());
+    assert_eq!(no_display.input.available_scopes(NOW), vec!["clipboard"]);
 
     let unsupported = NativeInput::new(Arc::new(UnsupportedBackend));
     assert!(unsupported.available_scopes(NOW).is_empty());
@@ -180,7 +196,7 @@ fn keyboard_capability_is_independent_but_requires_accessibility_and_a_display()
     let ready = Rig::ready();
     assert_eq!(
         ready.input.available_scopes(NOW),
-        vec!["pointer", "keyboard"]
+        vec!["pointer", "keyboard", "clipboard"]
     );
 
     let no_access = Rig::new(PermissionState::NotGranted, vec![main_display()]);
@@ -218,7 +234,7 @@ fn a_single_display_is_selected_but_several_require_an_explicit_choice() {
     let status = multi.input.status(NOW);
     assert_eq!(status.selected_display_id, None);
     assert!(!status.pointer_ready);
-    assert!(multi.input.available_scopes(NOW).is_empty());
+    assert_eq!(multi.input.available_scopes(NOW), vec!["clipboard"]);
     assert_eq!(status.displays.len(), 2);
 
     assert!(multi.input.select_display(99, NOW).is_err());
@@ -227,7 +243,7 @@ fn a_single_display_is_selected_but_several_require_an_explicit_choice() {
     assert!(status.pointer_ready);
     assert_eq!(
         multi.input.available_scopes(NOW),
-        vec!["pointer", "keyboard"]
+        vec!["pointer", "keyboard", "clipboard"]
     );
 }
 
@@ -261,7 +277,10 @@ fn an_explicit_selection_survives_a_second_display_being_added() {
 fn never_exposes_display_topology_through_the_remote_capability() {
     let rig = Rig::ready();
     // The only remote-visible value is this list of scope names.
-    assert_eq!(rig.input.available_scopes(NOW), vec!["pointer", "keyboard"]);
+    assert_eq!(
+        rig.input.available_scopes(NOW),
+        vec!["pointer", "keyboard", "clipboard"]
+    );
 }
 
 // ----- Mapping and event classification ---------------------------------------------------------
@@ -367,7 +386,12 @@ fn a_drag_sends_drag_events_between_down_and_up() {
         .iter()
         .map(|call| match call {
             Call::Move(kind, ..) | Call::Button(kind, ..) => *kind,
-            Call::Scroll(..) | Call::Keyboard(..) => unreachable!(),
+            Call::Scroll(..)
+            | Call::Keyboard(..)
+            | Call::ClipboardRead
+            | Call::ClipboardWrite(_) => {
+                unreachable!()
+            }
         })
         .collect();
     assert_eq!(
@@ -535,6 +559,7 @@ fn a_new_grant_does_not_honour_the_previous_grants_events() {
             surface_id: SURFACE.into(),
             pointer: true,
             keyboard: false,
+            clipboard: false,
             expires_at_ms: NOW + 60_000,
         },
         NOW,
@@ -864,4 +889,302 @@ fn only_local_and_capability_endings_ask_the_browser_to_revoke() {
     ] {
         assert!(!cause.needs_browser_revoke());
     }
+}
+
+// ----- Clipboard -------------------------------------------------------------------------------
+
+const TRANSFER: &str = "123e4567-e89b-12d3-a456-4266141740aa";
+
+fn clip(op: ClipboardOp, transfer: &str) -> ClipboardRequest {
+    ClipboardRequest {
+        control_session_id: SESSION.into(),
+        surface_id: SURFACE.into(),
+        transfer_id: transfer.into(),
+        op,
+    }
+}
+
+fn write(text: &str) -> ClipboardRequest {
+    clip(ClipboardOp::Write(text.into()), TRANSFER)
+}
+
+fn transfer(n: u8) -> String {
+    format!("123e4567-e89b-12d3-a456-4266141740{n:02x}")
+}
+
+#[test]
+fn clipboard_is_advertised_by_platform_support_and_never_on_unsupported_backends() {
+    let rig = Rig::ready();
+    assert!(rig.input.status(NOW).clipboard_available);
+    assert!(rig.input.available_scopes(NOW).contains(&"clipboard"));
+
+    rig.backend.set_clipboard_supported(false);
+    assert!(!rig.input.status(NOW).clipboard_available);
+    assert!(!rig.input.available_scopes(NOW).contains(&"clipboard"));
+
+    let unsupported = NativeInput::new(Arc::new(UnsupportedBackend));
+    assert!(!unsupported.status(NOW).clipboard_available);
+    assert!(unsupported.available_scopes(NOW).is_empty());
+}
+
+#[test]
+fn a_clipboard_only_grant_writes_and_reads_text_without_accessibility_or_a_display() {
+    let rig = Rig::new(PermissionState::NotGranted, vec![]);
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    assert_eq!(
+        rig.input.clipboard(&write("hello"), NOW),
+        ClipboardOutcome::Written
+    );
+    assert_eq!(rig.backend.clipboard_text().as_deref(), Some("hello"));
+    // The grant survives the periodic Accessibility and display re-check.
+    rig.input.refresh(NOW + 10);
+    assert!(rig.ended().is_empty());
+    rig.backend.set_clipboard(Some("remote text"));
+    assert_eq!(
+        rig.input
+            .clipboard(&clip(ClipboardOp::Read, &transfer(1)), NOW + 1_000),
+        ClipboardOutcome::Text("remote text".into())
+    );
+}
+
+#[test]
+fn pointer_and_keyboard_grants_never_authorize_the_clipboard() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(true, true, false, NOW + 60_000);
+    assert_eq!(
+        rig.input.clipboard(&write("secret"), NOW),
+        ClipboardOutcome::Denied(Denied::ScopeMissing)
+    );
+    assert_eq!(
+        rig.input
+            .clipboard(&clip(ClipboardOp::Read, &transfer(1)), NOW + 1_000),
+        ClipboardOutcome::Denied(Denied::ScopeMissing)
+    );
+    assert!(rig.backend.calls().is_empty());
+    assert_eq!(rig.backend.clipboard_text(), None);
+}
+
+#[test]
+fn a_clipboard_only_grant_does_not_authorize_pointer_or_keyboard_input() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    assert_eq!(rig.send(&rig.mv(0.5, 0.5)), Err(Denied::ScopeMissing));
+    assert_eq!(
+        rig.send(&rig.key("KeyA", "down")),
+        Err(Denied::ScopeMissing)
+    );
+    rig.run();
+    assert!(rig.backend.calls().is_empty());
+}
+
+#[test]
+fn combined_grants_authorize_each_scope_independently() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(true, true, true, NOW + 60_000);
+    assert_eq!(rig.send(&rig.mv(0.5, 0.5)), Ok(()));
+    assert_eq!(
+        rig.input.clipboard(&write("both"), NOW),
+        ClipboardOutcome::Written
+    );
+}
+
+#[test]
+fn clipboard_requires_the_live_session_surface_and_expiry() {
+    let rig = Rig::ready();
+    assert_eq!(
+        rig.input.clipboard(&write("x"), NOW),
+        ClipboardOutcome::Denied(Denied::NoSession)
+    );
+    rig.grant_clipboard(false, false, true, NOW + 5_000);
+
+    let mut other_session = write("x");
+    other_session.control_session_id = OTHER.into();
+    assert_eq!(
+        rig.input.clipboard(&other_session, NOW),
+        ClipboardOutcome::Denied(Denied::WrongSession)
+    );
+    let mut other_surface = write("x");
+    other_surface.surface_id = OTHER.into();
+    assert_eq!(
+        rig.input.clipboard(&other_surface, NOW),
+        ClipboardOutcome::Denied(Denied::WrongSurface)
+    );
+    assert_eq!(
+        rig.input.clipboard(&write("late"), NOW + 5_000),
+        ClipboardOutcome::Denied(Denied::Expired)
+    );
+    assert_eq!(rig.ended(), vec![EndCause::Expired]);
+    assert_eq!(
+        rig.input.clipboard(
+            &clip(ClipboardOp::Write("x".into()), &transfer(2)),
+            NOW + 6_000
+        ),
+        ClipboardOutcome::Denied(Denied::NoSession)
+    );
+    assert!(rig.backend.calls().is_empty());
+}
+
+#[test]
+fn clipboard_is_refused_after_revocation_and_a_new_grant_does_not_honour_old_requests() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    rig.input.end_matching_session(SESSION, EndCause::Revoked);
+    assert_eq!(
+        rig.input.clipboard(&write("x"), NOW),
+        ClipboardOutcome::Denied(Denied::NoSession)
+    );
+
+    rig.input.begin_session(
+        SessionGrant {
+            control_session_id: OTHER.into(),
+            surface_id: SURFACE.into(),
+            pointer: false,
+            keyboard: false,
+            clipboard: true,
+            expires_at_ms: NOW + 60_000,
+        },
+        NOW,
+    );
+    assert_eq!(
+        rig.input.clipboard(&write("stale"), NOW),
+        ClipboardOutcome::Denied(Denied::WrongSession)
+    );
+    assert!(rig.backend.calls().is_empty());
+}
+
+#[test]
+fn duplicate_transfers_and_floods_are_refused() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    assert_eq!(
+        rig.input.clipboard(&write("once"), NOW),
+        ClipboardOutcome::Written
+    );
+    // Same transfer id again, even much later.
+    assert_eq!(
+        rig.input.clipboard(&write("once"), NOW + 5_000),
+        ClipboardOutcome::Denied(Denied::Replayed)
+    );
+    // A new id too soon after the last operation.
+    assert_eq!(
+        rig.input.clipboard(
+            &clip(ClipboardOp::Write("fast".into()), &transfer(3)),
+            NOW + 100
+        ),
+        ClipboardOutcome::Denied(Denied::RateLimited)
+    );
+    assert_eq!(
+        rig.input.clipboard(
+            &clip(ClipboardOp::Write("ok".into()), &transfer(3)),
+            NOW + 600
+        ),
+        ClipboardOutcome::Written
+    );
+    assert_eq!(rig.backend.clipboard_text().as_deref(), Some("ok"));
+}
+
+#[test]
+fn a_new_session_starts_with_a_clean_replay_window() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    assert_eq!(
+        rig.input.clipboard(&write("a"), NOW),
+        ClipboardOutcome::Written
+    );
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    assert_eq!(
+        rig.input.clipboard(&write("b"), NOW),
+        ClipboardOutcome::Written
+    );
+}
+
+#[test]
+fn invalid_oversized_and_control_character_text_is_refused_before_the_clipboard_is_touched() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    for text in [
+        String::new(),
+        "x".repeat(crate::protocol::MAX_CLIPBOARD_TEXT_BYTES + 1),
+        "bad\u{0}text".into(),
+        "esc\u{1b}[31m".into(),
+    ] {
+        assert_eq!(
+            rig.input
+                .clipboard(&clip(ClipboardOp::Write(text), &transfer(9)), NOW),
+            ClipboardOutcome::Denied(Denied::Invalid)
+        );
+    }
+    let mut bad_id = write("x");
+    bad_id.transfer_id = "nope".into();
+    assert_eq!(
+        rig.input.clipboard(&bad_id, NOW),
+        ClipboardOutcome::Denied(Denied::Invalid)
+    );
+    assert!(rig.backend.calls().is_empty());
+}
+
+#[test]
+fn reads_report_empty_oversized_and_unsupported_content_without_returning_it() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    let read = |n: u8, at: u64| {
+        rig.input
+            .clipboard(&clip(ClipboardOp::Read, &transfer(n)), at)
+    };
+
+    rig.backend.set_clipboard(None);
+    assert_eq!(read(1, NOW), ClipboardOutcome::Empty);
+    rig.backend.set_clipboard(Some(
+        &"x".repeat(crate::protocol::MAX_CLIPBOARD_TEXT_BYTES + 1),
+    ));
+    assert_eq!(read(2, NOW + 1_000), ClipboardOutcome::TooLarge);
+    rig.backend.set_clipboard(Some("bell\u{7}"));
+    assert_eq!(read(3, NOW + 2_000), ClipboardOutcome::Failed);
+    rig.backend.set_clipboard(Some("fine \u{1F600}\n"));
+    assert_eq!(
+        read(4, NOW + 3_000),
+        ClipboardOutcome::Text("fine \u{1F600}\n".into())
+    );
+}
+
+#[test]
+fn backend_failures_and_unavailable_platforms_are_reported_not_hidden() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    rig.backend.fail_clipboard(Some(ClipboardError::Failed));
+    assert_eq!(
+        rig.input.clipboard(&write("x"), NOW),
+        ClipboardOutcome::Failed
+    );
+    rig.backend
+        .fail_clipboard(Some(ClipboardError::Unavailable));
+    assert_eq!(
+        rig.input
+            .clipboard(&clip(ClipboardOp::Read, &transfer(5)), NOW + 1_000),
+        ClipboardOutcome::Unavailable
+    );
+    rig.backend.fail_clipboard(None);
+    rig.backend.set_clipboard_supported(false);
+    assert_eq!(
+        rig.input.clipboard(
+            &clip(ClipboardOp::Write("x".into()), &transfer(6)),
+            NOW + 2_000
+        ),
+        ClipboardOutcome::Denied(Denied::ClipboardUnsupported)
+    );
+}
+
+#[test]
+fn losing_accessibility_ends_input_grants_but_not_a_clipboard_only_grant() {
+    let rig = Rig::ready();
+    rig.grant_clipboard(false, false, true, NOW + 60_000);
+    rig.backend.set_permission(PermissionState::NotGranted);
+    rig.input.refresh(NOW + 10);
+    assert!(rig.ended().is_empty());
+
+    let pointer = Rig::ready();
+    pointer.grant_clipboard(true, false, true, NOW + 60_000);
+    pointer.backend.set_permission(PermissionState::NotGranted);
+    pointer.input.refresh(NOW + 10);
+    assert_eq!(pointer.ended(), vec![EndCause::PermissionLost]);
 }

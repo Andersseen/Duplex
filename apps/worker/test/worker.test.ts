@@ -523,6 +523,120 @@ describe('CallRoom WebSocket signaling', () => {
     peer.close();
   });
 
+  it('relays clipboard operations only between a participant and its own helper', async () => {
+    const roomId = createRoomId();
+    const owner = await connect(roomId);
+    const ownerJoined = nextMessage(owner);
+    join(owner, roomId);
+    await ownerJoined;
+    await nextMessage(owner);
+    const peer = await connect(roomId);
+    const peerJoined = nextMessage(peer);
+    const ownerPeerJoined = nextMessage(owner);
+    join(peer, roomId);
+    await Promise.all([peerJoined, ownerPeerJoined]);
+    await nextMessage(peer);
+    const created = nextMessage(owner, 'helper-pairing-created');
+    owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    const pairing = (await created) as { type: string; payload: { token: string } };
+    const paired = nextMessage(owner, 'helper-paired');
+    const response = await app.request(
+      `/api/rooms/${roomId}/helper/ws`,
+      { headers: { Upgrade: 'websocket', Authorization: `Bearer ${pairing.payload.token}` } },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    const helper = (response as Response & { webSocket: WebSocket }).webSocket;
+    helper.accept();
+    await paired;
+
+    const ids = {
+      controlSessionId: crypto.randomUUID(),
+      surfaceId: crypto.randomUUID(),
+      transferId: crypto.randomUUID(),
+    };
+    const write = { type: 'helper-clipboard-write', ...ids, text: 'paste me' };
+    const read = { type: 'helper-clipboard-read', ...ids };
+
+    // owner -> its own helper only.
+    const delivered = nextMessage(helper, 'helper-clipboard-write');
+    const noPeerWrite = expectNoMessage(peer);
+    owner.send(JSON.stringify(write));
+    expect(await delivered).toEqual(write);
+    await noPeerWrite;
+    const deliveredRead = nextMessage(helper, 'helper-clipboard-read');
+    owner.send(JSON.stringify(read));
+    expect(await deliveredRead).toEqual(read);
+
+    // helper -> owner only, including approved clipboard text.
+    const result = {
+      type: 'helper-clipboard-result',
+      controlSessionId: ids.controlSessionId,
+      transferId: ids.transferId,
+      outcome: 'ok',
+      text: 'from the helper',
+    };
+    const relayed = nextMessage(owner, 'helper-clipboard-result');
+    const noPeerResult = expectNoMessage(peer);
+    helper.send(JSON.stringify(result));
+    expect(await relayed).toEqual({
+      type: 'helper-clipboard-result',
+      payload: result,
+    });
+    await noPeerResult;
+
+    // A participant without a paired helper cannot address anyone else's helper.
+    const noHelperDelivery = expectNoMessage(helper);
+    peer.send(JSON.stringify(write));
+    await noHelperDelivery;
+
+    // Padding past the clipboard frame bound is refused before routing.
+    const oversized = nextMessage(owner, 'oversized clipboard rejection');
+    owner.send(JSON.stringify(write) + ' '.repeat(17 * 1024));
+    expect((await oversized).type).toBe('protocol-error');
+    await expectNoMessage(helper);
+
+    helper.close(1000, 'done');
+    owner.close();
+    peer.close();
+  });
+
+  it('closes a helper that sends clipboard text with a failed outcome', async () => {
+    const roomId = createRoomId();
+    const owner = await connect(roomId);
+    const ownerJoined = nextMessage(owner);
+    join(owner, roomId);
+    await ownerJoined;
+    await nextMessage(owner);
+    const created = nextMessage(owner, 'helper-pairing-created');
+    owner.send(JSON.stringify({ type: 'helper-pairing-create', payload: {} }));
+    const pairing = (await created) as { type: string; payload: { token: string } };
+    const paired = nextMessage(owner, 'helper-paired');
+    const response = await app.request(
+      `/api/rooms/${roomId}/helper/ws`,
+      { headers: { Upgrade: 'websocket', Authorization: `Bearer ${pairing.payload.token}` } },
+      { ...env, ENVIRONMENT: 'production' },
+    );
+    const helper = (response as Response & { webSocket: WebSocket }).webSocket;
+    helper.accept();
+    await paired;
+    const closed = new Promise<number>((resolve) => {
+      helper.addEventListener('close', (event) => {
+        resolve(event.code);
+      });
+    });
+    helper.send(
+      JSON.stringify({
+        type: 'helper-clipboard-result',
+        controlSessionId: crypto.randomUUID(),
+        transferId: crypto.randomUUID(),
+        outcome: 'denied',
+        text: 'must not be here',
+      }),
+    );
+    expect(await closed).toBe(1008);
+    owner.close();
+  });
+
   it('refuses a direct non-WebSocket request at the room object', async () => {
     const stub = env.CALL_ROOM.get(env.CALL_ROOM.idFromName(createRoomId()));
 
@@ -606,7 +720,8 @@ describe('CallRoom WebSocket signaling', () => {
       { type: 'offer', payload: { sdp: 'v=0' } },
       { type: 'helper-input', input: { type: 'input-scroll' } },
       { type: 'helper-capabilities', availableScopes: ['pointer'], displays: [{ id: 1 }] },
-      { type: 'helper-capabilities', availableScopes: ['clipboard'] },
+      { type: 'helper-capabilities', availableScopes: ['screen'] },
+      { type: 'helper-clipboard-read', controlSessionId: crypto.randomUUID() },
       { type: 'control-revoked' },
     ]) {
       const created = nextMessage(owner, 'helper-pairing-created');

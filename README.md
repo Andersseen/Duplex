@@ -44,10 +44,12 @@ powerful part (remote control): temporary, scoped, and revocable by either side.
 | Assist consent flow       | Working. Request → explicit Allow → temporary scoped session, revocable by either side. |
 | Native pointer control    | **Experimental, macOS only.** Move, click, drag and scroll through the paired helper.   |
 | Native keyboard control   | **Experimental, macOS only.** Physical keys through a separate explicit scope.          |
+| Clipboard text            | **Experimental, macOS only.** Manual, text-only send/copy through its own scope.        |
 | Windows / Linux control   | **Not implemented.** The helper pairs but never advertises a native capability.         |
 
 Duplex is not a TeamViewer or AnyDesk replacement: it has no unattended access, no persistent
-pairing, no multi-user rooms, no chat, no recording and no clipboard sync.
+pairing, no multi-user rooms, no chat, no recording and no automatic clipboard sync (clipboard text moves
+only when someone clicks, inside an explicitly granted `clipboard` scope).
 
 <p align="center">
   <img src="docs/assets/screen-sharing.png" alt="Screen sharing with collaboration tools" width="49%">
@@ -79,15 +81,17 @@ Real TURN relay and production deployment are covered in [DEPLOYMENT.md](./DEPLO
 
 ## Platform support
 
-| Platform | Browser calling                | Native pointer control       | Native keyboard control      |
-| -------- | ------------------------------ | ---------------------------- | ---------------------------- |
-| macOS    | Modern Chromium-based browsers | **Supported** (experimental) | **Supported** (experimental) |
-| Windows  | Modern Chromium-based browsers | Not yet                      | Not yet                      |
-| Linux    | Modern Chromium-based browsers | Not yet                      | Not yet                      |
+| Platform | Browser calling                | Native pointer control       | Native keyboard control      | Clipboard text               |
+| -------- | ------------------------------ | ---------------------------- | ---------------------------- | ---------------------------- |
+| macOS    | Modern Chromium-based browsers | **Supported** (experimental) | **Supported** (experimental) | **Supported** (experimental) |
+| Windows  | Modern Chromium-based browsers | Not yet                      | Not yet                      | Not yet                      |
+| Linux    | Modern Chromium-based browsers | Not yet                      | Not yet                      | Not yet                      |
 
 Automated tests run in Chromium. Other engines are best effort. Native pointer and keyboard control
 need an **entire monitor** share, a paired helper, macOS Accessibility permission and an explicit
-Allow for each requested scope (details in [docs/assist.md](./docs/assist.md)).
+Allow for each requested scope (details in [docs/assist.md](./docs/assist.md)). Clipboard text needs
+no Accessibility permission but is its own opt-in scope, and reading the sharer's clipboard needs
+their approval every time.
 
 ## Architecture
 
@@ -120,7 +124,7 @@ media or file contents. See [docs/architecture.md](./docs/architecture.md).
 - A room link is an **anonymous 128-bit capability**; rooms hold at most two people and exist only while occupied.
 - WebSocket origins are validated; TURN keys stay in Worker secrets and only short-lived credentials reach browsers.
 - Helper pairing uses a **256-bit, two-minute, one-use** token; only its SHA-256 hash is kept server-side.
-- The native helper **re-validates every input event** itself (session, surface, scope, expiry, sequence, rate, Accessibility, display).
+- The native helper **re-validates every input event** itself (session, surface, scope, expiry, sequence, rate, Accessibility, display), and re-authorizes every clipboard operation.
 - **No unattended access**: no saved credentials, no always-allow, no background start.
 
 Full detail and threat model: [docs/security.md](./docs/security.md). To report a vulnerability see [SECURITY.md](./SECURITY.md).
@@ -129,7 +133,8 @@ Full detail and threat model: [docs/security.md](./docs/security.md). To report 
 
 Pairing identifies _your_ helper; it grants nothing. Control needs the peer's request **and** your
 explicit Allow, scoped to the screen you are sharing, expiring automatically, and revocable from
-either browser or the helper. Pointer permission is not keyboard permission, and browser
+either browser or the helper. Pointer permission is not keyboard permission, neither is clipboard
+permission, and browser
 collaboration (pointer/laser/draw) is not native control. See [docs/assist.md](./docs/assist.md).
 
 ## Development
@@ -182,7 +187,8 @@ e2e/               Playwright suites
 
 ## Roadmap
 
-Live, file transfer, collaboration, the Assist consent flow and macOS pointer control are done.
+Live, file transfer, collaboration, the Assist consent flow, macOS pointer and keyboard control and
+manual clipboard text are done.
 Windows/Linux helpers and capture are later and unscheduled. See [docs/roadmap.md](./docs/roadmap.md).
 
 ## Contributing

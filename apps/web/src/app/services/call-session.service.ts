@@ -14,6 +14,7 @@ import type { DuplexDataChannel } from '@duplex/webrtc';
 import { FileTransferService } from './file-transfer.service';
 import { CollaborationService } from './collaboration.service';
 import { ControlService } from './control.service';
+import { ClipboardService } from './clipboard.service';
 import { RemoteInputService } from './remote-input.service';
 
 export type CallState =
@@ -48,6 +49,7 @@ export class CallSessionService implements OnDestroy {
   readonly collaboration = new CollaborationService();
   readonly control = new ControlService();
   readonly remoteInput = new RemoteInputService(this.control);
+  readonly clipboard = new ClipboardService(this.control);
   readonly helperPairingCode = signal<string | null>(null);
   readonly helperPairingExpiresAt = signal<number | null>(null);
   readonly helperConnected = signal(false);
@@ -82,6 +84,11 @@ export class CallSessionService implements OnDestroy {
     this.remoteInput.setHelperRelay((input) => {
       if (this.socket?.readyState !== WebSocket.OPEN || !this.helperConnected()) return false;
       this.socket.send(JSON.stringify({ type: 'helper-input', input }));
+      return true;
+    });
+    this.clipboard.setHelperRelay((message) => {
+      if (this.socket?.readyState !== WebSocket.OPEN || !this.helperConnected()) return false;
+      this.socket.send(JSON.stringify(message));
       return true;
     });
     this.collaboration.setPeerMediaListener((source, surfaceId) => {
@@ -423,6 +430,8 @@ export class CallSessionService implements OnDestroy {
       this.control.setHelperConnected(false);
     } else if (message.type === 'helper-capabilities') {
       this.control.setHelperScopes(message.payload.availableScopes);
+    } else if (message.type === 'helper-clipboard-result') {
+      this.clipboard.handleHelperResult(message.payload);
     } else if (message.type === 'helper-stop-control') {
       // The local user stopped control from the helper: converge through the normal revoke path.
       const active = this.control.session();
@@ -508,6 +517,7 @@ export class CallSessionService implements OnDestroy {
           this.control.attachChannel(event.channel);
         } else if (event.channel.label === DATA_CHANNEL_LABELS.input) {
           this.remoteInput.attachChannel(event.channel);
+          this.clipboard.attachChannel(event.channel);
         } else {
           this.collaboration.attachChannel(event.channel);
         }
@@ -565,6 +575,7 @@ export class CallSessionService implements OnDestroy {
     this.fileChannelOpen.set(false);
     this.control.peerChanged();
     this.remoteInput.peerChanged();
+    this.clipboard.peerChanged();
     this.fileTransfers.peerChanged();
     this.collaboration.peerChanged();
     this.peerUnsubscribe?.();

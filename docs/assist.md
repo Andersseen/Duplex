@@ -3,8 +3,8 @@
 Assist is Duplex's consent-based remote-help flow. This page explains the trust model; the protocol
 and enforcement details are in [security.md](./security.md) and [architecture.md](./architecture.md).
 
-> **Status: experimental.** Native pointer and keyboard control work on macOS only. Clipboard and
-> Windows/Linux control are not implemented.
+> **Status: experimental.** Native pointer, keyboard and clipboard-text control work on macOS only.
+> Windows/Linux control is not implemented.
 
 ## Three different things
 
@@ -12,6 +12,7 @@ and enforcement details are in [security.md](./security.md) and [architecture.md
 | ------------------------------------------------ | ------------------------------- | ---------------------------------------------------------------------------------------- |
 | **Pairing** a helper                             | **Permission** to be controlled | Pairing only says "this helper belongs to this participant". It grants the peer nothing. |
 | **Pointer** permission                           | **Keyboard** permission         | Scopes are separate. The sharer sees and approves each requested scope.                  |
+| **Clipboard** permission                         | Pointer or keyboard permission  | Clipboard is its own opt-in scope; neither of the others can reach it, nor it them.      |
 | **Browser collaboration** (pointer, laser, draw) | **Native control**              | Collaboration draws on the shared video in the browser; it never moves your real cursor. |
 
 ## The flow
@@ -32,7 +33,7 @@ flowchart TD
 1. **Share a monitor.** The browser must report an entire monitor. Tab, window or unknown sources never qualify.
 2. **Pair the helper.** Create a one-use, two-minute pairing code in the call and paste it into the helper.
 3. **Prepare the Mac.** In the helper, click **Enable Accessibility** (the only way a prompt is ever shown), approve it in System Settings, **Re-check**, and — with several displays — pick the one you are sharing.
-4. **Peer requests.** Only now does the peer see **Request control**, and only for scopes the helper can execute (`pointer` and, on macOS, `keyboard`).
+4. **Peer requests.** Only now does the peer see **Request control**, and only for scopes the helper can execute (`pointer` and, on macOS, `keyboard` and `clipboard`).
 5. **You decide.** An alert dialog names the requested scope and says access expires. **Reject** changes nothing; **Allow** creates a grant.
 6. **Temporary scoped grant.** The grant is tied to the current shared screen, carries its own session ID, and expires automatically (ten minutes at most).
 7. **The helper independently validates input.** Session, screen, scope, expiry, ordering, rate, Accessibility and display are all checked again in Rust before any event is posted.
@@ -47,7 +48,44 @@ events.
 ## What Assist deliberately does not do
 
 - No unattended access: no background start, saved credentials, persistent pairing or "always allow".
-- No clipboard or file-system access through the helper. Keyboard events are limited to an explicit
-  physical-key allowlist and do not send text or key values to the server.
+- No file-system access through the helper, and no clipboard content other than plain text. Keyboard
+  events are limited to an explicit physical-key allowlist and do not send text or key values to the
+  server.
+- No clipboard watching, history or automatic mirroring (see below).
 - No control of a window or tab share — only an entire monitor.
 - No capability on Windows or Linux: the helper can pair there, but never advertises a scope.
+
+## Clipboard text
+
+Clipboard sync is deliberately **manual and text-only**. Nothing reads or writes a clipboard until
+someone clicks, and the clipboard is never mirrored in either direction.
+
+| Question                       | Answer                                                                                                                                                                                                       |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| How is it requested?           | Only if the controller ticks **Clipboard text** when requesting control. It is unticked by default, and a default request is pointer and keyboard only.                                                      |
+| How is it granted?             | The sharer's dialog describes the scope and shows its box **unticked**. Allow stays disabled until at least one scope is chosen. Rejecting, or granting only pointer, leaves the clipboard unreachable.      |
+| What can the controller do?    | **Send my clipboard text** (their clipboard → the sharer's clipboard) and **Get remote clipboard text** (the sharer's clipboard → theirs). Each is one explicit click.                                       |
+| What does the sharer see?      | A status line such as "Your peer put 42 characters of text on your clipboard" (never the text), and a **Clipboard read request** dialog — **Share once** or **Decline** — for every read.                    |
+| What does the sharer's Mac do? | The helper writes or reads the system pasteboard itself, after re-checking session, surface, scope, expiry, a fresh transfer id and a minimum interval. It needs **no** Accessibility permission.            |
+| What ends it?                  | The same things that end any grant: either browser, the helper's **Stop control**, expiry (10 minutes at most), a changed or ended share, or any disconnect. Pending requests and received text are dropped. |
+
+### Limits
+
+- **Plain text only**, at most **4096 UTF-8 bytes** (`MAX_CLIPBOARD_TEXT_BYTES`). Longer text is refused, never truncated.
+- Control characters other than tab, carriage return and line feed (NUL, escape, DEL, …) and malformed Unicode are refused, so a paste cannot smuggle terminal escape sequences.
+- One operation at a time, at least 500 ms apart; a request that arrives sooner gets "busy".
+- Images, files, rich text and HTML are never read or written.
+
+### Browser permissions
+
+The browser's Async Clipboard API still decides. Chromium asks the controller to allow reading their
+clipboard the first time and only inside a click; if it is denied, or the API is missing (older or
+non-secure contexts), Duplex says so and sends nothing. Copying remote text to the controller's
+clipboard is its own click, after the text has arrived. Duplex never reads a clipboard on focus, load
+or in the background. Production sets `Permissions-Policy: clipboard-read=(self), clipboard-write=(self)`.
+
+### What is not verified
+
+Automated tests drive a fake helper and a fake pasteboard. Real `pbcopy`/`pbpaste` behavior has not
+been exercised end to end on hardware by this change — use the manual checklist in
+[testing.md](./testing.md#manual-macos-checklist).

@@ -11,11 +11,12 @@ use tokio_tungstenite::{
 };
 
 use crate::input::{
-    now_ms, DisplayInfo, EndCause, NativeEvent, NativeInput, NativeStatus, SessionGrant,
+    now_ms, ClipboardOutcome, DisplayInfo, EndCause, NativeEvent, NativeInput, NativeStatus,
+    SessionGrant,
 };
 use crate::{
     pairing::PairingBundle,
-    protocol::{BridgeMessage, MAX_BRIDGE_MESSAGE_BYTES},
+    protocol::{BridgeMessage, ClipboardRequest, MAX_BRIDGE_MESSAGE_BYTES},
 };
 
 /// Permission and display changes are cheap to re-check, but there is no reason to poll quickly.
@@ -143,6 +144,7 @@ pub async fn connect_helper(
                                                 surface_id: session.surface_id.clone(),
                                                 pointer: session.scopes.iter().any(|scope| scope == "pointer"),
                                                 keyboard: session.scopes.iter().any(|scope| scope == "keyboard"),
+                                                clipboard: session.scopes.iter().any(|scope| scope == "clipboard"),
                                                 expires_at_ms: session.expires_at,
                                             },
                                             now,
@@ -155,6 +157,19 @@ pub async fn connect_helper(
                                     // Straight to the native layer; never through the UI.
                                     BridgeMessage::Input { input } => {
                                         let _ = native.submit(&input, now);
+                                    }
+                                    clipboard => {
+                                        // Validated above; authorized again natively, then answered with the outcome only.
+                                        let Some(request) = clipboard.clipboard_request() else { continue };
+                                        let worker = native.clone();
+                                        let outcome = tokio::task::spawn_blocking({
+                                            let request = request.clone();
+                                            move || worker.clipboard(&request, now)
+                                        })
+                                        .await
+                                        .unwrap_or(ClipboardOutcome::Failed);
+                                        let reply = clipboard_result(&request, &outcome);
+                                        let _ = writer.send(Message::Text(reply.to_string().into())).await;
                                     }
                                 }
                             }
@@ -259,6 +274,29 @@ async fn announce_capabilities<W>(
     {
         *announced = Some(scopes);
     }
+}
+
+/// The answer sent back to the room. Text appears only for a successful, authorized read.
+fn clipboard_result(request: &ClipboardRequest, outcome: &ClipboardOutcome) -> serde_json::Value {
+    let (label, text) = match outcome {
+        ClipboardOutcome::Written => ("ok", None),
+        ClipboardOutcome::Text(text) => ("ok", Some(text.as_str())),
+        ClipboardOutcome::Denied(_) => ("denied", None),
+        ClipboardOutcome::Unavailable => ("unavailable", None),
+        ClipboardOutcome::Empty => ("empty", None),
+        ClipboardOutcome::TooLarge => ("too-large", None),
+        ClipboardOutcome::Failed => ("failed", None),
+    };
+    let mut result = json!({
+        "type": "helper-clipboard-result",
+        "controlSessionId": request.control_session_id,
+        "transferId": request.transfer_id,
+        "outcome": label,
+    });
+    if let Some(text) = text {
+        result["text"] = json!(text);
+    }
+    result
 }
 
 fn emit(app: &AppHandle, status: &str, details: Option<serde_json::Value>) {

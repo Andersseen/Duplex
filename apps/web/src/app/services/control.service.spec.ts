@@ -427,4 +427,128 @@ describe('ControlService', () => {
       vi.useRealTimers();
     });
   });
+
+  describe('clipboard scope', () => {
+    function pairedController(scopes: readonly ('pointer' | 'keyboard' | 'clipboard')[]) {
+      const service = new ControlService();
+      const channel = new FakeChannel();
+      const peerSurface = crypto.randomUUID();
+      service.attachChannel(channel);
+      channel.open();
+      service.setPeerMedia('screen', peerSurface);
+      channel.receive({
+        type: 'control-capability',
+        protocolVersion: 1,
+        surfaceId: peerSurface,
+        helperConnected: true,
+        availableScopes: scopes,
+      });
+      return { service, channel, peerSurface };
+    }
+
+    it('never requests the clipboard unless it is named explicitly', () => {
+      const { service, channel } = pairedController(['pointer', 'keyboard', 'clipboard']);
+      service.requestControl();
+      expect(JSON.parse(channel.sent.at(-1) ?? '{}')).toMatchObject({
+        type: 'control-request',
+        scopes: ['pointer', 'keyboard'],
+      });
+      service.peerChanged();
+      const explicit = pairedController(['pointer', 'clipboard']);
+      explicit.service.requestControl(['clipboard']);
+      expect(JSON.parse(explicit.channel.sent.at(-1) ?? '{}')).toMatchObject({
+        scopes: ['clipboard'],
+      });
+    });
+
+    it('does not send an empty request when only the clipboard is offered and none is chosen', () => {
+      const { service, channel } = pairedController(['clipboard']);
+      service.requestControl();
+      expect(channel.sent).toEqual([]);
+      expect(service.state()).toBe('idle');
+    });
+
+    it('grants the clipboard only when the controlled user explicitly selects it', () => {
+      const service = new ControlService();
+      const channel = new FakeChannel();
+      const surface = crypto.randomUUID();
+      service.attachChannel(channel);
+      channel.open();
+      service.setLocalScreen(surface, true);
+      service.setHelperConnected(true);
+      service.setHelperScopes(['pointer', 'clipboard']);
+      expect(service.localAvailableScopes()).toEqual(['pointer', 'clipboard']);
+      const ask = (scopes: string[]) => {
+        channel.receive({
+          type: 'control-request',
+          protocolVersion: 1,
+          surfaceId: surface,
+          requestId: crypto.randomUUID(),
+          scopes,
+        });
+      };
+
+      ask(['pointer', 'clipboard']);
+      service.allow();
+      expect(service.session()?.scopes).toEqual(['pointer']);
+      service.release();
+
+      ask(['pointer', 'clipboard']);
+      service.allow(['pointer', 'clipboard']);
+      expect(service.session()?.scopes).toEqual(['pointer', 'clipboard']);
+      service.release();
+
+      // A clipboard-only request granted with no explicit choice grants nothing.
+      ask(['clipboard']);
+      service.allow();
+      expect(service.session()).toBeNull();
+      expect(JSON.parse(channel.sent.at(-1) ?? '{}')).toMatchObject({ type: 'control-rejected' });
+    });
+
+    it('rejects a clipboard request when the helper cannot service the clipboard', () => {
+      const service = new ControlService();
+      const channel = new FakeChannel();
+      const surface = crypto.randomUUID();
+      service.attachChannel(channel);
+      channel.open();
+      service.setLocalScreen(surface, true);
+      service.setHelperConnected(true);
+      service.setHelperScopes(['pointer']);
+      channel.receive({
+        type: 'control-request',
+        protocolVersion: 1,
+        surfaceId: surface,
+        requestId: crypto.randomUUID(),
+        scopes: ['clipboard'],
+      });
+      expect(service.incomingRequest()).toBeNull();
+      expect(JSON.parse(channel.sent.at(-1) ?? '{}')).toMatchObject({ type: 'control-rejected' });
+    });
+
+    it('revokes a clipboard grant when the helper stops advertising the clipboard', () => {
+      const service = new ControlService();
+      const channel = new FakeChannel();
+      const surface = crypto.randomUUID();
+      service.attachChannel(channel);
+      channel.open();
+      service.setLocalScreen(surface, true);
+      service.setHelperConnected(true);
+      service.setHelperScopes(['clipboard']);
+      channel.receive({
+        type: 'control-request',
+        protocolVersion: 1,
+        surfaceId: surface,
+        requestId: crypto.randomUUID(),
+        scopes: ['clipboard'],
+      });
+      service.allow(['clipboard']);
+      expect(service.session()?.scopes).toEqual(['clipboard']);
+      service.setHelperScopes([]);
+      expect(service.session()).toBeNull();
+      expect(JSON.parse(channel.sent.at(-1) ?? '{}')).toMatchObject({
+        type: 'control-revoked',
+        reason: 'capability-lost',
+      });
+    });
+  });
 });

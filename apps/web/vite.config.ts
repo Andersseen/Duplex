@@ -41,7 +41,7 @@ function securityHeaders(apiOrigin: string | undefined): Record<string, string> 
     // The room URL is a bearer capability, so it must never leak through a Referer header.
     'Referrer-Policy': 'no-referrer',
     'Permissions-Policy':
-      'camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=(), usb=(), clipboard-read=(), clipboard-write=(self)',
+      'camera=(self), microphone=(self), display-capture=(self), geolocation=(), payment=(), usb=(), clipboard-read=(self), clipboard-write=(self)',
   };
 }
 
