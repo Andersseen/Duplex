@@ -125,6 +125,7 @@ media or file contents. See [docs/architecture.md](./docs/architecture.md).
 - WebSocket origins are validated; TURN keys stay in Worker secrets and only short-lived credentials reach browsers.
 - Helper pairing uses a **256-bit, two-minute, one-use** token; only its SHA-256 hash is kept server-side.
 - The native helper **re-validates every input event** itself (session, surface, scope, expiry, sequence, rate, Accessibility, display), and re-authorizes every clipboard operation.
+- The signaling Worker applies **per-connection message rate limits** and the web app ships a **strict script CSP** (no `'unsafe-inline'`); the helper window has an explicit, minimal Tauri permission set.
 - **No unattended access**: no saved credentials, no always-allow, no background start.
 
 Full detail and threat model: [docs/security.md](./docs/security.md). To report a vulnerability see [SECURITY.md](./SECURITY.md).

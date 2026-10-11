@@ -22,7 +22,7 @@
     "rust:check": "cargo check --manifest-path apps/helper/src-tauri/Cargo.toml --locked",
     "rust:fmt:check": "cargo fmt --manifest-path apps/helper/src-tauri/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path apps/helper/src-tauri/Cargo.toml --locked -- -D warnings",
-    "check:tauri": "node scripts/check-tauri-security.mjs",
+    "check:tauri": "node scripts/check-tauri-security.mjs && node --test scripts/*.test.mjs",
     "e2e": "playwright test",
     "e2e:production": "playwright test --config playwright.production.config.ts",
     "e2e:turn": "node scripts/e2e-turn.mjs",

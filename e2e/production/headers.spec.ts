@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
@@ -29,6 +30,153 @@ function watchForViolations(page: Page): string[] {
   });
   return problems;
 }
+
+const sha256 = (body: string): string =>
+  `'sha256-${createHash('sha256').update(body).digest('base64')}'`;
+
+/** The executable inline scripts in a document, i.e. the ones a strict CSP has to authorize. */
+function executableInlineScripts(html: string): string[] {
+  return [...html.matchAll(/<script(?![^>]*\bsrc=)([^>]*)>([\s\S]*?)<\/script>/g)]
+    .filter((match) => !/type="application\/json"/.test(match[1] ?? ''))
+    .map((match) => match[2] ?? '');
+}
+
+const scriptSrc = (csp: string): string =>
+  csp
+    .split(';')
+    .find((directive) => directive.trim().startsWith('script-src'))
+    ?.trim() ?? '';
+
+test.describe('production strict script CSP', () => {
+  for (const path of ['/', ROOM]) {
+    test(`${path} authorizes exactly its own inline scripts by hash`, async ({ request }) => {
+      const response = await request.get(path);
+      const csp = response.headers()['content-security-policy'] ?? '';
+      const directive = scriptSrc(csp);
+      expect(directive).toMatch(/^script-src 'self'( 'sha256-[A-Za-z0-9+/]+={0,2}')+$/);
+      expect(csp).not.toContain('unsafe-eval');
+      expect(directive).not.toContain('unsafe-inline');
+      const scripts = executableInlineScripts(await response.text());
+      expect(scripts.length).toBeGreaterThanOrEqual(2);
+      for (const script of scripts)
+        expect(directive, script.slice(0, 40)).toContain(sha256(script));
+      // The rest of the policy keeps its strength.
+      for (const part of [
+        "default-src 'self'",
+        "object-src 'none'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ])
+        expect(csp).toContain(part);
+    });
+  }
+
+  test('inline bootstrap runs, but an injected inline script is blocked', async ({ page }) => {
+    await page.addInitScript(() => {
+      (window as unknown as { __violations: string[] }).__violations = [];
+      document.addEventListener('securitypolicyviolation', (event) => {
+        (window as unknown as { __violations: string[] }).__violations.push(
+          event.violatedDirective,
+        );
+      });
+    });
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Start a call' })).toBeVisible();
+    const result = await page.evaluate(() => {
+      const probe = window as unknown as {
+        __jsaction_bootstrap?: unknown;
+        __injected?: boolean;
+        __violations: string[];
+      };
+      const script = document.createElement('script');
+      script.textContent = 'window.__injected = true;';
+      document.body.append(script);
+      return {
+        bootstrap: typeof probe.__jsaction_bootstrap,
+        injected: probe.__injected ?? false,
+        violations: probe.__violations,
+      };
+    });
+    expect(result.bootstrap).toBe('function');
+    expect(result.injected).toBe(false);
+    await expect
+      .poll(() =>
+        page.evaluate(() => (window as unknown as { __violations: string[] }).__violations),
+      )
+      .toContain('script-src-elem');
+  });
+
+  test('event replay and hydration still work: a click made before the app boots is replayed', async ({
+    page,
+  }) => {
+    const problems = watchForViolations(page);
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // Hold back the application entry so the click happens while only the inline contract is live.
+    await page.route('**/assets/index-*.js', async (route) => {
+      await gate;
+      await route.continue();
+    });
+    // Module scripts delay DOMContentLoaded, so resolve on the first response bytes instead.
+    await page.goto('/', { waitUntil: 'commit' });
+    await page.getByRole('button', { name: 'Start a call' }).click();
+    await expect(page.getByRole('heading', { name: 'Ready to join' })).toBeHidden();
+    release();
+    await expect(page.getByRole('heading', { name: 'Ready to join' })).toBeVisible();
+    expect(problems).toEqual([]);
+  });
+
+  test('lazy chunks load under the policy when navigating client-side', async ({ page }) => {
+    const problems = watchForViolations(page);
+    const chunks: string[] = [];
+    page.on('response', (response) => {
+      const url = response.url();
+      if (/\/assets\/.+\.js$/.test(url) && response.status() === 200) chunks.push(url);
+    });
+    await page.goto('/');
+    await expect(page.getByRole('button', { name: 'Start a call' })).toBeVisible();
+    const before = chunks.length;
+    await page.getByRole('button', { name: 'Start a call' }).click();
+    await expect(page.getByRole('heading', { name: 'Ready to join' })).toBeVisible();
+    expect(chunks.length).toBeGreaterThan(before);
+    expect(problems).toEqual([]);
+  });
+
+  test('static assets and permissions keep their headers and policy', async ({ page, request }) => {
+    const html = await (await request.get('/')).text();
+    const asset = /src="(\/assets\/[^"]+\.js)"/.exec(html)?.[1] ?? '';
+    const headers = (await request.get(asset)).headers();
+    for (const [name, pattern] of Object.entries(REQUIRED_HEADERS))
+      expect(headers[name], name).toMatch(pattern);
+    await page.goto('/');
+    const allowed = await page.evaluate(() => {
+      const policy = (
+        document as unknown as { featurePolicy: { allowsFeature(name: string): boolean } }
+      ).featurePolicy;
+      return Object.fromEntries(
+        [
+          'camera',
+          'microphone',
+          'display-capture',
+          'clipboard-read',
+          'clipboard-write',
+          'geolocation',
+        ].map((feature) => [feature, policy.allowsFeature(feature)]),
+      );
+    });
+    expect(allowed).toEqual({
+      camera: true,
+      microphone: true,
+      'display-capture': true,
+      'clipboard-read': true,
+      'clipboard-write': true,
+      geolocation: false,
+    });
+  });
+});
 
 test.describe('production security headers', () => {
   for (const path of ['/', ROOM, '/favicon.svg']) {

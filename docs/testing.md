@@ -29,7 +29,7 @@ pnpm e2e:production      # build + run the production Worker with real security 
 pnpm e2e:turn            # optional: forced relay (needs apps/worker/.dev.vars TURN secrets)
 
 cargo test --manifest-path apps/helper/src-tauri/Cargo.toml --locked
-pnpm check:tauri         # guards the helper's capabilities and CSP
+pnpm check:tauri         # audits the helper's capabilities, commands and CSP, then runs its own tests
 ```
 
 `pnpm test` stays quick for local iteration; coverage is a separate, CI-quality command.
@@ -58,6 +58,25 @@ runs in Node/jsdom where V8 coverage is faster and more accurate.
 `cargo llvm-cov` would add toolchain components and platform-specific numbers (the macOS backend
 cannot run without Accessibility). Platform-independent logic is already covered by the fake-backend
 tests; revisit if the helper grows.
+
+## Security regression tests
+
+| Guarantee                                                                                                                                                                                               | Where                                                        |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ |
+| Token-bucket math, fake clock (stall, backwards time, abuse threshold)                                                                                                                                  | `apps/worker/test/rate-limit.test.ts`                        |
+| ICE bursts pass; participant, helper and malformed floods close with 4008                                                                                                                               | `apps/worker/test/rate-limit-room.test.ts`                   |
+| Per-connection isolation, reconnect with a fresh budget, cleanup on close                                                                                                                               | same                                                         |
+| Revocation and helper Stop delivered while bulk traffic is throttled                                                                                                                                    | same                                                         |
+| Clipboard text never appears in logs; size bounds still enforced                                                                                                                                        | same                                                         |
+| CSP hash extraction only accepts Angular's own scripts                                                                                                                                                  | `apps/web/src/server/csp.spec.ts`                            |
+| Shipped CSP has no `unsafe-inline`/`unsafe-eval` and hashes every inline script; injected inline script is blocked; event replay, lazy chunks, signaling, media, screen share and clipboard policy work | `e2e/production/headers.spec.ts`                             |
+| Tauri allowlist, commands, CSP, plugins, remote origins and windows                                                                                                                                     | `pnpm check:tauri` (`scripts/check-tauri-security.test.mjs`) |
+
+These run in CI. None of them exercise real macOS Accessibility, input or the packaged Tauri
+window; the narrowed capability has only been validated by compilation (`tauri-build` checks the
+capability against the command manifest). **Before relying on the narrower grant, run the helper on
+macOS (`pnpm dev:helper`), pair it, and confirm the status, display list, Stop and live state
+updates still work.** Native control remains experimental.
 
 ## What cannot be automated safely
 

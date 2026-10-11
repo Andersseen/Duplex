@@ -110,7 +110,7 @@ helpers, 1 KiB for `helper-input`, 512 B for input envelopes, 16 KiB for clipboa
 | **Cross-participant helper access**     | Helper traffic is routed by `ownerParticipantId`; helpers cannot inject participant messages; peer browsers never receive `helper-*` traffic.                                                                                                  | —                                                                                                                                                                                                                                                               |
 | **Stale surface input**                 | Grants bind to a surface ID; the helper rejects mismatches; a new share invalidates the old grant (tested in the web services, E2E and Rust).                                                                                                  | —                                                                                                                                                                                                                                                               |
 | **Stale control session**               | `controlSessionId` check; expiry; strictly increasing sequence numbers reject replays and reordering.                                                                                                                                          | —                                                                                                                                                                                                                                                               |
-| **Malformed protocol payload**          | Zod validation in browsers and the Worker; strict schemas; size caps; Rust re-parses and validates; malformed helper/participant frames close the socket.                                                                                      | The Worker enforces size, not message rate (see gaps).                                                                                                                                                                                                          |
+| **Malformed protocol payload**          | Zod validation in browsers and the Worker; strict schemas; size caps; Rust re-parses and validates; malformed helper/participant frames close the socket.                                                                                      | The Worker enforces size and per-connection message rate (see above).                                                                                                                                                                                           |
 | **Dependency compromise**               | Frozen lockfile in CI; Dependabot (grouped, weekly); Dependency Review blocks new high/critical advisories on PRs; `pnpm audit`; RustSec; CodeQL.                                                                                              | A malicious release of a trusted dependency can still land before an advisory exists. Review dependency bumps.                                                                                                                                                  |
 | **Secret leakage**                      | TURN secrets only in Worker secrets; failure logs omit them; pairing codes are dropped when used; screenshots use only synthetic content.                                                                                                      | Secrets entered into a shell or `.dev.vars` are the developer's responsibility; secret scanning + push protection recommended.                                                                                                                                  |
 | **Input flooding**                      | Browser coalesces motion to one update per frame and drops motion under backpressure; helper rate-limits (240/s), bounds its queue and keeps only the latest move.                                                                             | A hostile controller can still consume up to the rate limit while a grant is live; the sharer can stop at any time.                                                                                                                                             |
@@ -130,22 +130,71 @@ These are exercised by `pnpm e2e:production`, which builds the real Worker outpu
 (hydration, signaling WebSocket, microphone, WebRTC, screen share) failing on any CSP violation. The
 protocol package runs Zod with code generation disabled so the policy needs no `'unsafe-eval'`.
 
-**Known gap:** `script-src` still allows `'unsafe-inline'`, because Angular's server renderer embeds
-two inline bootstrap scripts (event-replay contract and hydration state) without a nonce. A
-nonce- or hash-based policy is future work; the rest of the policy still blocks remote script
-loading, plugins, framing and unexpected network destinations.
+### Script CSP: hashes, no `'unsafe-inline'`
+
+`script-src` is `'self'` plus SHA-256 hashes, never `'unsafe-inline'` or `'unsafe-eval'`. Angular's
+renderer emits two inline executable scripts (the event-replay contract and the
+`window.__jsaction_bootstrap(...)` call that registers event types); the hydration state is a
+non-executable `application/json` block that CSP does not apply to.
+
+- **Why hashes, not a nonce.** The landing page is prerendered and served by Cloudflare static assets
+  without running the Worker, so it cannot carry a per-response nonce. A static nonce would be
+  reusable and therefore worthless. Hashes cover prerendered and SSR pages with one mechanism.
+- **SSR responses:** a Nitro plugin (`apps/web/src/server/plugins/csp-script-hashes.ts`) hashes the
+  scripts in the rendered HTML and appends them to that response's `Content-Security-Policy`.
+- **Prerendered pages:** `scripts/apply-static-csp.mjs` runs after the build and writes the hashes of
+  every prerendered page into `_headers`.
+- **Only Angular's scripts are hashed.** The extractor accepts exactly the contract script (by its
+  `id`) and a strictly shaped bootstrap call. Any other inline script, including one injected into
+  the markup, is not hashed and the browser blocks it (verified in `pnpm e2e:production`).
+- `style-src` still allows `'unsafe-inline'` because Angular applies component styles inline. That is
+  a separate, weaker gap: it cannot execute script.
+
+## Worker message rate limiting
+
+Each WebSocket gets in-memory token buckets inside the `CallRoom` Durable Object
+(`apps/worker/src/rate-limit.ts`). Nothing is stored, shared between connections, keyed by address or
+user, or logged beyond which kind of connection hit which limit. State is dropped when the socket
+closes; hibernation resets a bucket to full, which only happens to idle sockets.
+
+| Bucket (per connection) | Burst | Sustained | Traffic                                                              |
+| ----------------------- | ----: | --------: | -------------------------------------------------------------------- |
+| Participant frame       |   500 |     400/s | **Every** frame, charged before parsing (malformed, binary, unknown) |
+| `signaling`             |   100 |      30/s | join, offer, answer, ICE candidates, config refresh, pairing create  |
+| `input`                 |   480 |     300/s | `helper-input` (browser already caps at 240/s)                       |
+| `clipboard`             |    10 |       2/s | clipboard write / read (manual actions)                              |
+| `control`               |    20 |       5/s | leave, `helper-session-authorized`, `helper-session-revoked`         |
+| Helper frame            |   100 |      50/s | every helper frame, charged before parsing                           |
+| Helper `status`         |    20 |       5/s | `helper-capabilities`                                                |
+| Helper `clipboard`      |    10 |       2/s | clipboard results                                                    |
+| Helper `control`        |    20 |       5/s | `helper-stop-control`                                                |
+
+Rejection is predictable: a message over its category budget is **dropped**; 25 consecutive drops, or
+any frame past the frame bucket, **closes the connection with code `4008`** (`Rate limit exceeded`).
+Closing a participant also closes its helper and notifies the peer; closing a helper tells its owner
+(`helper-disconnected`), so a flood always ends with control revoked, never left running. Revocation,
+leave and the helper's Stop have their own buckets that bulk traffic cannot drain, and a legitimate
+ICE gathering fits inside the signaling burst. Malformed and unknown messages already closed the
+socket and are additionally charged to the frame bucket. No protocol change: clients see an ordinary
+close.
 
 ## Tauri helper boundary
 
-The helper window has a single capability granting `core:default` and its eight own commands. There
-are no shell, filesystem, process, HTTP or opener plugins, no remote capabilities and no global
-Tauri object; its CSP forbids eval, remote origins, framing and form posts. `pnpm check:tauri`
-fails CI if any of that widens without a reviewed change.
+The helper window has a single capability granting exactly ten permissions: `core:event:allow-listen`,
+`core:event:allow-unlisten` (the UI only listens for state pushes) and `allow-*` for its eight own
+commands. It no longer inherits `core:default`, so the page cannot call window, webview, app, path,
+menu, tray, resource or image APIs. There are no shell, filesystem, process, HTTP, opener or other
+plugins, no remote capabilities and no global Tauri object; its CSP forbids eval, `unsafe-inline`
+scripts, remote origins, `connect-src`, framing and form posts. `pnpm check:tauri` audits this
+(including the command lists in `build.rs` and `lib.rs`) and its tests in
+`scripts/check-tauri-security.test.mjs` prove each loosening is rejected. CI compiles the crate on
+Linux and macOS, which validates the capability against the real command manifest; it cannot prove
+the packaged UI works with the narrower grant, and that still needs the manual macOS check in
+[docs/testing.md](./testing.md).
 
 ## Known gaps
 
-- No per-message rate limit in the Worker (size limits only).
-- CSP `script-src 'unsafe-inline'` (above).
+- Rate limits are per connection, not per room or per client: someone who reconnects gets a fresh budget. The Worker still bounds frame size, room capacity and join admission.
 - No room lock or admission prompt: whoever arrives first with the link takes a free seat.
 - Pairing tokens are visible in the sharer's browser for up to two minutes.
 - Native control is macOS-only and has not been audited by a third party.
