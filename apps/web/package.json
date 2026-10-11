@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "build:cloudflare": "NITRO_PRESET=cloudflare_module vite build && node ../../scripts/clean-headers.mjs dist/analog/public/_headers",
+    "build:cloudflare": "NITRO_PRESET=cloudflare_module vite build && node ../../scripts/clean-headers.mjs dist/analog/public/_headers && node ../../scripts/apply-static-csp.mjs dist/analog/public",
     "deploy": "node ../../scripts/deploy-web.mjs",
     "preview": "vite preview",
     "typecheck": "ngc -p tsconfig.app.json --noEmit && ngc -p tsconfig.spec.json --noEmit",

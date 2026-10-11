@@ -1,5 +1,6 @@
 import analog from '@analogjs/platform';
 import tailwindcss from '@tailwindcss/vite';
+import { fileURLToPath } from 'node:url';
 import { defineConfig } from 'vite';
 
 // The worker (`pnpm dev` runs it alongside) serves /health and /api/*. Analog's own
@@ -11,9 +12,9 @@ const WORKER_ORIGIN = 'http://localhost:8787';
  * responses) and written to the static `_headers` file (prerendered assets). Development keeps
  * none of them: Vite's HMR needs inline scripts and its own WebSocket.
  *
- * Content-Security-Policy keeps `'unsafe-inline'` for scripts because Angular's SSR output embeds
- * two inline bootstrap scripts (event-replay contract and hydration state) that have no nonce yet.
- * Everything else is locked down; see docs/security.md for the remaining gap.
+ * `script-src` allows only same-origin files. Angular's SSR output embeds two inline event-replay
+ * scripts; their SHA-256 hashes are appended per response by `src/server/plugins/csp-script-hashes.ts`
+ * (SSR) and `scripts/apply-static-csp.mjs` (prerendered pages). See docs/security.md.
  */
 function securityHeaders(apiOrigin: string | undefined): Record<string, string> {
   const connect = ["'self'"];
@@ -24,7 +25,7 @@ function securityHeaders(apiOrigin: string | undefined): Record<string, string> 
   return {
     'Content-Security-Policy': [
       "default-src 'self'",
-      "script-src 'self' 'unsafe-inline'",
+      "script-src 'self'",
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "media-src 'self' blob: mediastream:",
@@ -60,6 +61,11 @@ export default defineConfig(({ command }) => ({
       nitro:
         command === 'build'
           ? {
+              plugins: [
+                fileURLToPath(
+                  new URL('./src/server/plugins/csp-script-hashes.ts', import.meta.url),
+                ),
+              ],
               routeRules: {
                 '/**': { headers: securityHeaders(process.env['VITE_DUPLEX_API_ORIGIN']) },
               },
