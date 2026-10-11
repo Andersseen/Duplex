@@ -9,6 +9,7 @@ interface NativeStatus {
   selectedDisplayId: number | null;
   pointerReady: boolean;
   keyboardAvailable: boolean;
+  clipboardAvailable: boolean;
   sessionActive: boolean;
 }
 
@@ -26,6 +27,7 @@ const nativeStatus = (overrides: Partial<NativeStatus> = {}): NativeStatus => ({
   selectedDisplayId: 1,
   pointerReady: true,
   keyboardAvailable: false,
+  clipboardAvailable: false,
   sessionActive: false,
   ...overrides,
 });
@@ -262,6 +264,31 @@ describe('App', () => {
     const session = await screen.findByRole('region', { name: 'Authorized control session' });
     expect(session).toHaveTextContent('pointer · keyboard');
     expect(screen.getAllByText('In use')).toHaveLength(2);
+  });
+
+  it('shows clipboard availability separately from pointer and keyboard', async () => {
+    await render(nativeStatus({ clipboardAvailable: true, accessibility: 'not-granted' }));
+    const row = screen.getByText('Clipboard text', { selector: 'h2' }).closest('.row');
+    expect(row).toHaveTextContent('Ready');
+  });
+
+  it('marks the clipboard unavailable where the platform cannot service it', async () => {
+    await render(nativeStatus({ platform: 'unsupported', clipboardAvailable: false }));
+    const row = screen.getByText('Clipboard text', { selector: 'h2' }).closest('.row');
+    expect(row).toHaveTextContent('Unavailable');
+  });
+
+  it('explains what a clipboard grant allows and shows it in use', async () => {
+    await render(nativeStatus({ clipboardAvailable: true, sessionActive: true }));
+    await push('helper-state', {
+      status: 'authorized',
+      details: { ...authorizedDetails(), scopes: ['clipboard'] },
+    });
+    const session = await screen.findByRole('region', { name: 'Authorized control session' });
+    expect(session).toHaveTextContent('clipboard');
+    expect(session).toHaveTextContent('only when you approve each request');
+    const row = screen.getByText('Clipboard text', { selector: 'h2' }).closest('.row');
+    expect(row).toHaveTextContent('In use');
   });
 
   it('shows a keyboard-only grant when that is the authorized scope', async () => {

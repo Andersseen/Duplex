@@ -9,6 +9,11 @@ import {
   INPUT_PROTOCOL_VERSION,
   MAX_INPUT_SCROLL_DELTA,
   inputMessageSchema,
+  CLIPBOARD_PROTOCOL_VERSION,
+  MAX_CLIPBOARD_TEXT_BYTES,
+  clipboardMessageSchema,
+  helperClipboardResultSchema,
+  isAcceptableClipboardText,
   helperBridgeMessageSchema,
   helperOutboundMessageSchema,
   decodeHelperPairingBundle,
@@ -299,7 +304,7 @@ describe('control messages', () => {
         scopes: ['pointer'],
       },
       { type: 'control-request', ...base, requestId, scopes: [] },
-      { type: 'control-request', ...base, requestId, scopes: ['clipboard'] },
+      { type: 'control-request', ...base, requestId, scopes: ['files'] },
       { type: 'control-request', ...base, requestId: 'not-a-uuid', scopes: ['pointer'] },
       { type: 'control-request', ...base, requestId, scopes: ['pointer', 'pointer'] },
       { type: 'control-request', ...base, requestId, scopes: ['pointer'], extra: true },
@@ -399,7 +404,7 @@ describe('control capability', () => {
   };
   it('requires explicit, unique, known available scopes', () => {
     expect(controlMessageSchema.safeParse(base).success).toBe(false);
-    for (const availableScopes of [['pointer', 'pointer'], ['clipboard'], 'pointer'])
+    for (const availableScopes of [['pointer', 'pointer'], ['files'], 'pointer'])
       expect(controlMessageSchema.safeParse({ ...base, availableScopes }).success).toBe(false);
     expect(controlMessageSchema.safeParse({ ...base, availableScopes: [], x: 1 }).success).toBe(
       false,
@@ -527,6 +532,151 @@ describe('helper outbound messages', () => {
       serverRoomMessageSchema.safeParse({
         type: 'helper-capabilities',
         payload: { availableScopes: ['pointer'] },
+      }).success,
+    ).toBe(true);
+  });
+});
+
+describe('clipboard scope and messages', () => {
+  const ids = {
+    protocolVersion: CLIPBOARD_PROTOCOL_VERSION,
+    controlSessionId: crypto.randomUUID(),
+    surfaceId: crypto.randomUUID(),
+    sequence: 1,
+    transferId: crypto.randomUUID(),
+  };
+
+  it('treats clipboard as its own scope in requests, grants and capability', () => {
+    const base = { protocolVersion: CONTROL_PROTOCOL_VERSION, surfaceId: crypto.randomUUID() };
+    expect(
+      controlMessageSchema.safeParse({
+        type: 'control-request',
+        ...base,
+        requestId,
+        scopes: ['clipboard'],
+      }).success,
+    ).toBe(true);
+    expect(
+      controlMessageSchema.safeParse({
+        type: 'control-request',
+        ...base,
+        requestId,
+        scopes: ['pointer', 'keyboard', 'clipboard'],
+      }).success,
+    ).toBe(true);
+    expect(
+      controlMessageSchema.safeParse({
+        type: 'control-request',
+        ...base,
+        requestId,
+        scopes: ['pointer', 'keyboard', 'clipboard', 'clipboard'],
+      }).success,
+    ).toBe(false);
+    expect(
+      controlMessageSchema.safeParse({
+        type: 'control-capability',
+        ...base,
+        helperConnected: true,
+        availableScopes: ['pointer', 'keyboard', 'clipboard'],
+      }).success,
+    ).toBe(true);
+  });
+
+  it('keeps clipboard messages out of the pointer and keyboard input schema', () => {
+    const write = { type: 'clipboard-write', ...ids, text: 'hello' };
+    expect(clipboardMessageSchema.safeParse(write).success).toBe(true);
+    expect(inputMessageSchema.safeParse(write).success).toBe(false);
+    expect(clipboardMessageSchema.safeParse({ type: 'input-scroll', ...ids }).success).toBe(false);
+  });
+
+  it('accepts the four message shapes and rejects extra keys, versions and ids', () => {
+    for (const message of [
+      { type: 'clipboard-write', ...ids, text: 'a' },
+      { type: 'clipboard-read-request', ...ids },
+      { type: 'clipboard-text', ...ids, text: 'multi\nline\ttext' },
+      { type: 'clipboard-status', ...ids, outcome: 'delivered' },
+    ])
+      expect(clipboardMessageSchema.safeParse(message).success, message.type).toBe(true);
+    for (const message of [
+      { type: 'clipboard-write', ...ids, text: 'a', extra: true },
+      { type: 'clipboard-read-request', ...ids, text: 'smuggled' },
+      { type: 'clipboard-write', ...ids, protocolVersion: 2, text: 'a' },
+      { type: 'clipboard-write', ...ids, transferId: 'nope', text: 'a' },
+      { type: 'clipboard-write', ...ids, sequence: -1, text: 'a' },
+      { type: 'clipboard-write', ...ids, sequence: 2 ** 32, text: 'a' },
+      { type: 'clipboard-write', ...ids },
+      { type: 'clipboard-status', ...ids, outcome: 'whatever' },
+      { type: 'clipboard-status', ...ids, outcome: 'delivered', text: 'secret' },
+    ])
+      expect(clipboardMessageSchema.safeParse(message).success).toBe(false);
+  });
+
+  it('bounds text by UTF-8 bytes, content and well-formedness', () => {
+    expect(isAcceptableClipboardText('a'.repeat(MAX_CLIPBOARD_TEXT_BYTES))).toBe(true);
+    expect(isAcceptableClipboardText('a'.repeat(MAX_CLIPBOARD_TEXT_BYTES + 1))).toBe(false);
+    // 2-byte characters: 2048 fit exactly, one more does not.
+    expect(isAcceptableClipboardText('é'.repeat(MAX_CLIPBOARD_TEXT_BYTES / 2))).toBe(true);
+    expect(isAcceptableClipboardText('é'.repeat(MAX_CLIPBOARD_TEXT_BYTES / 2 + 1))).toBe(false);
+    expect(isAcceptableClipboardText('')).toBe(false);
+    expect(isAcceptableClipboardText('a\u0000b')).toBe(false);
+    expect(isAcceptableClipboardText('a\u001bb')).toBe(false);
+    expect(isAcceptableClipboardText('a\u007fb')).toBe(false);
+    expect(isAcceptableClipboardText('\ud800')).toBe(false);
+    expect(isAcceptableClipboardText('😀')).toBe(true);
+    expect(isAcceptableClipboardText('tab\there\r\n')).toBe(true);
+  });
+
+  it('wraps clipboard operations for the helper only in dedicated shapes', () => {
+    const helperIds = {
+      controlSessionId: ids.controlSessionId,
+      surfaceId: ids.surfaceId,
+      transferId: ids.transferId,
+    };
+    expect(
+      helperBridgeMessageSchema.safeParse({
+        type: 'helper-clipboard-write',
+        ...helperIds,
+        text: 'x',
+      }).success,
+    ).toBe(true);
+    expect(
+      helperBridgeMessageSchema.safeParse({ type: 'helper-clipboard-read', ...helperIds }).success,
+    ).toBe(true);
+    expect(
+      signalingMessageSchema.safeParse({ type: 'helper-clipboard-read', ...helperIds }).success,
+    ).toBe(true);
+    expect(
+      signalingMessageSchema.safeParse({ type: 'helper-clipboard-read', ...helperIds, text: 'x' })
+        .success,
+    ).toBe(false);
+    // The helper answers; it may not issue requests.
+    expect(
+      helperOutboundMessageSchema.safeParse({ type: 'helper-clipboard-read', ...helperIds })
+        .success,
+    ).toBe(false);
+  });
+
+  it('only allows text with a successful helper result', () => {
+    const result = {
+      type: 'helper-clipboard-result',
+      controlSessionId: ids.controlSessionId,
+      transferId: ids.transferId,
+    };
+    expect(helperClipboardResultSchema.safeParse({ ...result, outcome: 'ok' }).success).toBe(true);
+    expect(
+      helperOutboundMessageSchema.safeParse({ ...result, outcome: 'ok', text: 'copied' }).success,
+    ).toBe(true);
+    expect(
+      helperClipboardResultSchema.safeParse({ ...result, outcome: 'denied', text: 'copied' })
+        .success,
+    ).toBe(false);
+    expect(helperClipboardResultSchema.safeParse({ ...result, outcome: 'nope' }).success).toBe(
+      false,
+    );
+    expect(
+      serverRoomMessageSchema.safeParse({
+        type: 'helper-clipboard-result',
+        payload: { ...result, outcome: 'empty' },
       }).success,
     ).toBe(true);
   });

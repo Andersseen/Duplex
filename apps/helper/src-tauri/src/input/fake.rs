@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use super::geometry::{DisplayTarget, MouseEventKind};
-use super::{InputError, NativePointerBackend, PermissionState};
+use super::{ClipboardError, InputError, NativePointerBackend, PermissionState};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Call {
@@ -11,6 +11,8 @@ pub enum Call {
     Button(MouseEventKind, f64, f64, i64),
     Scroll(i32, i32),
     Keyboard(String, bool),
+    ClipboardRead,
+    ClipboardWrite(String),
 }
 
 pub struct FakeState {
@@ -21,6 +23,10 @@ pub struct FakeState {
     pub permission_requests: u32,
     /// What a successful explicit request flips the permission to.
     pub grant_on_request: bool,
+    pub clipboard_supported: bool,
+    /// The fake pasteboard contents; `None` models an empty or non-text clipboard.
+    pub clipboard: Option<String>,
+    pub clipboard_error: Option<ClipboardError>,
 }
 
 pub struct FakeBackend {
@@ -37,6 +43,9 @@ impl FakeBackend {
                 fail_with: None,
                 permission_requests: 0,
                 grant_on_request: true,
+                clipboard_supported: true,
+                clipboard: None,
+                clipboard_error: None,
             }),
         }
     }
@@ -59,6 +68,22 @@ impl FakeBackend {
 
     pub fn fail_with(&self, error: Option<InputError>) {
         self.state.lock().unwrap().fail_with = error;
+    }
+
+    pub fn set_clipboard_supported(&self, supported: bool) {
+        self.state.lock().unwrap().clipboard_supported = supported;
+    }
+
+    pub fn set_clipboard(&self, text: Option<&str>) {
+        self.state.lock().unwrap().clipboard = text.map(str::to_owned);
+    }
+
+    pub fn clipboard_text(&self) -> Option<String> {
+        self.state.lock().unwrap().clipboard.clone()
+    }
+
+    pub fn fail_clipboard(&self, error: Option<ClipboardError>) {
+        self.state.lock().unwrap().clipboard_error = error;
     }
 
     fn record(&self, call: Call) -> Result<(), InputError> {
@@ -117,5 +142,28 @@ impl NativePointerBackend for FakeBackend {
 
     fn keyboard(&self, code: &str, down: bool) -> Result<(), InputError> {
         self.record(Call::Keyboard(code.to_owned(), down))
+    }
+
+    fn supports_clipboard(&self) -> bool {
+        self.state.lock().unwrap().clipboard_supported
+    }
+
+    fn clipboard_read(&self) -> Result<String, ClipboardError> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push(Call::ClipboardRead);
+        if let Some(error) = state.clipboard_error {
+            return Err(error);
+        }
+        Ok(state.clipboard.clone().unwrap_or_default())
+    }
+
+    fn clipboard_write(&self, text: &str) -> Result<(), ClipboardError> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push(Call::ClipboardWrite(text.to_owned()));
+        if let Some(error) = state.clipboard_error {
+            return Err(error);
+        }
+        state.clipboard = Some(text.to_owned());
+        Ok(())
     }
 }

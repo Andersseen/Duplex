@@ -8,7 +8,8 @@ const REQUIRED_HEADERS: Record<string, RegExp> = {
   'x-content-type-options': /^nosniff$/,
   'x-frame-options': /^DENY$/,
   'referrer-policy': /^no-referrer$/,
-  'permissions-policy': /camera=\(self\).*microphone=\(self\).*display-capture=\(self\)/,
+  'permissions-policy':
+    /camera=\(self\).*microphone=\(self\).*display-capture=\(self\).*clipboard-read=\(self\).*clipboard-write=\(self\)/,
   'strict-transport-security': /max-age=\d+/,
 };
 

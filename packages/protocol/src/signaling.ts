@@ -3,6 +3,11 @@ import { roomIdSchema } from './room';
 import { helperSessionMetadataSchema } from './helper';
 import { controlRevocationReasonSchema, controlScopeSchema } from './control';
 import { inputMessageSchema } from './input';
+import {
+  helperClipboardReadSchema,
+  helperClipboardResultSchema,
+  helperClipboardWriteSchema,
+} from './clipboard';
 
 const SDP_LIMIT = 64 * 1024;
 
@@ -89,6 +94,8 @@ export const clientSignalingMessageSchema = z.discriminatedUnion('type', [
   helperSessionAuthorizedMessageSchema,
   helperSessionRevokedMessageSchema,
   helperInputMessageSchema,
+  helperClipboardWriteSchema,
+  helperClipboardReadSchema,
   offerMessageSchema,
   answerMessageSchema,
   iceCandidateMessageSchema,
@@ -190,7 +197,7 @@ export const helperCapabilitiesMessageSchema = z
       .object({
         availableScopes: z
           .array(controlScopeSchema)
-          .max(2)
+          .max(3)
           .refine((values) => new Set(values).size === values.length),
       })
       .strict(),
@@ -200,6 +207,14 @@ export const helperStopControlMessageSchema = z
   .object({
     type: z.literal('helper-stop-control'),
     payload: z.object({ controlSessionId: z.uuid() }).strict(),
+  })
+  .strict();
+
+/** The paired helper's clipboard answer, relayed only to the participant that owns the helper. */
+export const helperClipboardResultRelaySchema = z
+  .object({
+    type: z.literal('helper-clipboard-result'),
+    payload: helperClipboardResultSchema,
   })
   .strict();
 
@@ -215,6 +230,7 @@ export const serverRoomMessageSchema = z.discriminatedUnion('type', [
   helperDisconnectedMessageSchema,
   helperCapabilitiesMessageSchema,
   helperStopControlMessageSchema,
+  helperClipboardResultRelaySchema,
 ]);
 
 export const serverSignalingMessageSchema = z.union([

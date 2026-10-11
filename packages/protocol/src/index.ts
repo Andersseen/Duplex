@@ -1,4 +1,5 @@
 import './runtime';
+export * from './clipboard';
 export * from './control';
 export * from './collaboration';
 export * from './file-transfer';

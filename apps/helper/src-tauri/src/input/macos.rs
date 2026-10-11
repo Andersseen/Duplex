@@ -6,6 +6,10 @@
 //! Coordinates are CoreGraphics global display points (the space `CGDisplayBounds` reports and
 //! `CGEventCreateMouseEvent` expects), so no `devicePixelRatio` scaling is involved anywhere.
 
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
 use objc2_application_services::{
     kAXTrustedCheckOptionPrompt, AXIsProcessTrusted, AXIsProcessTrustedWithOptions,
 };
@@ -16,10 +20,13 @@ use objc2_core_graphics::{
 };
 
 use super::geometry::{DisplayTarget, MouseEventKind};
-use super::{InputError, NativePointerBackend, PermissionState};
+use super::{ClipboardError, InputError, NativePointerBackend, PermissionState};
 
 /// More displays than any real desk setup; bounds the stack buffer for the display list.
 const MAX_DISPLAYS: usize = 16;
+
+/// Hard stop for a clipboard helper process; a hung pasteboard must never hang a session.
+const CLIPBOARD_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub struct MacosBackend;
 
@@ -156,6 +163,18 @@ impl NativePointerBackend for MacosBackend {
         true
     }
 
+    fn supports_clipboard(&self) -> bool {
+        std::path::Path::new(PBCOPY).exists() && std::path::Path::new(PBPASTE).exists()
+    }
+
+    fn clipboard_read(&self) -> Result<String, ClipboardError> {
+        Self::read_clipboard()
+    }
+
+    fn clipboard_write(&self, text: &str) -> Result<(), ClipboardError> {
+        Self::write_clipboard(text)
+    }
+
     fn keyboard(&self, code: &str, down: bool) -> Result<(), InputError> {
         let keycode = native_keycode(code).ok_or(InputError::Failed)?;
         Self::post(CGEvent::new_keyboard_event(None, keycode, down))
@@ -236,6 +255,99 @@ fn native_keycode(code: &str) -> Option<u16> {
     })
 }
 
+// ----- Plain-text clipboard --------------------------------------------------------------------
+//
+// The system `pbcopy`/`pbpaste` tools are the supported way to reach the general pasteboard
+// without adding an AppKit dependency. They are invoked by absolute path, with a fixed UTF-8
+// locale and a hard timeout, and they only ever carry text.
+
+const PBCOPY: &str = "/usr/bin/pbcopy";
+const PBPASTE: &str = "/usr/bin/pbpaste";
+
+fn command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command
+        .env_clear()
+        .env("LANG", "en_US.UTF-8")
+        .env("LC_CTYPE", "UTF-8");
+    command
+}
+
+/// Wait for `child` to exit, killing it after [`CLIPBOARD_TIMEOUT`].
+fn wait_with_timeout(child: &mut std::process::Child) -> Result<bool, ClipboardError> {
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status.success()),
+            Ok(None) if started.elapsed() < CLIPBOARD_TIMEOUT => {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ClipboardError::Failed);
+            }
+        }
+    }
+}
+
+impl MacosBackend {
+    pub(super) fn read_clipboard() -> Result<String, ClipboardError> {
+        let mut child = command(PBPASTE)
+            .args(["-Prefer", "txt"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| ClipboardError::Failed)?;
+        let mut stdout = child.stdout.take().ok_or(ClipboardError::Failed)?;
+        // Read one byte past the bound so oversized content is detected, never truncated.
+        let limit = (crate::protocol::MAX_CLIPBOARD_TEXT_BYTES + 1) as u64;
+        let reader = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout
+                .by_ref()
+                .take(limit)
+                .read_to_end(&mut bytes)
+                .map(|_| bytes)
+        });
+        let finished = wait_with_timeout(&mut child);
+        let bytes = reader
+            .join()
+            .map_err(|_| ClipboardError::Failed)?
+            .map_err(|_| ClipboardError::Failed)?;
+        if bytes.len() as u64 >= limit {
+            // Over the bound: the caller reports it as too large and never uses this text.
+            return Ok(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        if !finished? {
+            return Err(ClipboardError::Failed);
+        }
+        String::from_utf8(bytes).map_err(|_| ClipboardError::Failed)
+    }
+
+    pub(super) fn write_clipboard(text: &str) -> Result<(), ClipboardError> {
+        let mut child = command(PBCOPY)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| ClipboardError::Failed)?;
+        let mut stdin = child.stdin.take().ok_or(ClipboardError::Failed)?;
+        if stdin.write_all(text.as_bytes()).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(ClipboardError::Failed);
+        }
+        drop(stdin);
+        if wait_with_timeout(&mut child)? {
+            Ok(())
+        } else {
+            Err(ClipboardError::Failed)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +383,22 @@ mod tests {
         assert_eq!(native_keycode("MetaLeft"), Some(0x37));
         assert_eq!(native_keycode("ArrowUp"), Some(0x7E));
         assert_eq!(native_keycode("Escape"), None);
+    }
+
+    #[test]
+    fn advertises_clipboard_support_only_when_the_system_tools_exist() {
+        assert!(MacosBackend.supports_clipboard());
+    }
+
+    /// Replaces the real clipboard, so it only runs on request:
+    /// `cargo test -- --ignored macos_clipboard_round_trip`
+    #[test]
+    #[ignore = "modifies the system clipboard; run manually"]
+    fn macos_clipboard_round_trip() {
+        let backend = MacosBackend;
+        let text = "duplex clipboard test \u{e9}\u{1F600}\nsecond line";
+        backend.clipboard_write(text).unwrap();
+        assert_eq!(backend.clipboard_read().unwrap(), text);
     }
 
     #[test]

@@ -55,6 +55,9 @@ Apps never import from other apps. Everything shared lives in `packages/*`.
   expiry, revoke, surface binding and helper capability.
 - **`RemoteInputService`** — turns controller gestures into validated, rate-limited, sequence-numbered
   normalized input over `duplex-input`.
+- **`ClipboardService`** — manual, text-only clipboard transfer inside a `clipboard` grant: typed
+  `clipboard-*` messages over `duplex-input`, per-operation authorization, controlled-side approval
+  of reads, and relay to the paired helper.
 
 Components are presentation only. Small presentational pieces live in `ui/` (`ControlButton`,
 `StatusBadge`, `Panel`) and room panels in `room/`; they read state from the services.
@@ -78,13 +81,13 @@ WebRTC prefers a direct path. Cloudflare STUN helps direct setup; Cloudflare Rea
 _encrypted_ traffic when NAT blocks it. The five DataChannels are created by the impolite peer with
 purpose-specific delivery:
 
-| Label                  | Delivery                  | Carries                                 |
-| ---------------------- | ------------------------- | --------------------------------------- |
-| `duplex-file-transfer` | reliable, ordered         | File offers, consent, chunks            |
-| `duplex-collaboration` | reliable, ordered         | Media-source state, strokes, clear      |
-| `duplex-pointer`       | unordered, no retransmits | Pointer / laser position                |
-| `duplex-control`       | reliable, ordered         | Assist request / grant / revoke         |
-| `duplex-input`         | reliable, ordered         | Normalized pointer input for the helper |
+| Label                  | Delivery                  | Carries                                                               |
+| ---------------------- | ------------------------- | --------------------------------------------------------------------- |
+| `duplex-file-transfer` | reliable, ordered         | File offers, consent, chunks                                          |
+| `duplex-collaboration` | reliable, ordered         | Media-source state, strokes, clear                                    |
+| `duplex-pointer`       | unordered, no retransmits | Pointer / laser position                                              |
+| `duplex-control`       | reliable, ordered         | Assist request / grant / revoke                                       |
+| `duplex-input`         | reliable, ordered         | Pointer/keyboard input and `clipboard-*` text messages for the helper |
 
 Camera and screen share one outgoing video sender (`replaceTrack`); starting a share replaces the
 camera and stopping it resumes the camera when still enabled.
@@ -130,6 +133,44 @@ protocol validation and an `input` module with a `NativeInput` backend. macOS us
 CoreGraphics/Accessibility through narrow `objc2` bindings; other platforms use a backend that never
 advertises a capability, and tests use a fake backend. The Angular UI only displays state and sends
 a few explicit commands (`connect_helper`, `select_display`, `request_accessibility`, `stop_control`, …).
+
+### Clipboard flow
+
+```mermaid
+sequenceDiagram
+  participant C as Controller browser
+  participant S as Sharer browser
+  participant R as CallRoom DO
+  participant H as Helper (Rust)
+  participant P as Pasteboard
+
+  Note over C,S: Granted scope: clipboard (its own opt-in)
+  C->>C: user clicks Send, browser asks to read clipboard
+  C->>S: duplex-input: clipboard-write (typed, bounded)
+  S->>S: re-check session, surface, scope, sequence, transfer id
+  S->>R: helper-clipboard-write
+  R->>H: helper-clipboard-write (owner's helper only, not stored)
+  H->>H: re-check session, surface, scope, expiry, transfer id
+  H->>P: write text
+  H->>R: helper-clipboard-result (no content)
+  R->>S: helper-clipboard-result
+  S->>C: clipboard-status (delivered)
+  C->>S: duplex-input: clipboard-read-request
+  S->>S: user clicks Share once
+  S->>R: helper-clipboard-read
+  R->>H: helper-clipboard-read
+  H->>P: read text
+  H->>R: helper-clipboard-result (text)
+  R->>S: helper-clipboard-result
+  S->>C: clipboard-text
+  C->>C: user clicks Copy to my clipboard
+```
+
+`clipboard.ts` in `packages/protocol` holds the schemas and limits shared by the browser, the Worker
+and (by mirrored constants) the Rust parser. In Rust, `input/clipboard.rs` extends the existing
+`NativeInput` and `NativePointerBackend` boundary — a backend that cannot service the clipboard (every
+non-macOS platform) is never advertised and every request is refused. Clipboard capability is
+separate from pairing and from Accessibility: it needs neither a selected display nor input trust.
 
 ## Web delivery
 

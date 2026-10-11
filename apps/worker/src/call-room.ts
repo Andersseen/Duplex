@@ -7,6 +7,7 @@ import {
   roomFullMessageSchema,
   serverSignalingMessageSchema,
   helperOutboundMessageSchema,
+  MAX_CLIPBOARD_MESSAGE_BYTES,
 } from '@duplex/protocol';
 import type { ServerSignalingMessage } from '@duplex/protocol';
 import { z } from 'zod';
@@ -15,6 +16,7 @@ import { generateRtcConfiguration } from './rtc-config';
 const MAX_MESSAGE_BYTES = 128 * 1024;
 /** A validated pointer input envelope is a few hundred bytes; reject anything padded beyond that. */
 const MAX_HELPER_INPUT_BYTES = 1024;
+const MAX_HELPER_MESSAGE_BYTES = 4096;
 const participantAttachmentSchema = z
   .object({
     kind: z.literal('participant'),
@@ -112,7 +114,9 @@ export class CallRoom extends DurableObject {
       return;
     }
     if (current.kind === 'helper') {
-      if (typeof data !== 'string' || new TextEncoder().encode(data).byteLength > 4096) {
+      const helperBytes =
+        typeof data === 'string' ? new TextEncoder().encode(data).byteLength : Infinity;
+      if (typeof data !== 'string' || helperBytes > MAX_CLIPBOARD_MESSAGE_BYTES) {
         socket.close(1008, 'Invalid helper message');
         return;
       }
@@ -128,8 +132,22 @@ export class CallRoom extends DurableObject {
         socket.close(1008, 'Invalid helper message');
         return;
       }
+      // Only a clipboard answer may exceed the control-plane bound.
+      if (
+        helperMessage.data.type !== 'helper-clipboard-result' &&
+        helperBytes > MAX_HELPER_MESSAGE_BYTES
+      ) {
+        socket.close(1008, 'Invalid helper message');
+        return;
+      }
       // A helper may only talk to the participant that paired it, and only with safe control-plane state.
-      if (helperMessage.data.type === 'helper-capabilities')
+      if (helperMessage.data.type === 'helper-clipboard-result') {
+        // Relayed once to the owning browser; never stored, logged or sent to the peer.
+        this.sendToParticipant(current.ownerParticipantId, {
+          type: 'helper-clipboard-result',
+          payload: helperMessage.data,
+        });
+      } else if (helperMessage.data.type === 'helper-capabilities')
         this.sendToParticipant(current.ownerParticipantId, {
           type: 'helper-capabilities',
           payload: { availableScopes: helperMessage.data.availableScopes },
@@ -270,6 +288,16 @@ export class CallRoom extends DurableObject {
       this.sendToOwnerHelper(current.participantId, message);
       return;
     }
+    if (message.type === 'helper-clipboard-write' || message.type === 'helper-clipboard-read') {
+      if (size > MAX_CLIPBOARD_MESSAGE_BYTES) {
+        sendProtocolError(socket, 'invalid_message', 'Clipboard message is too large.');
+        socket.close(1009, 'Clipboard too large');
+        return;
+      }
+      // Transient relay to this participant's own helper only: clipboard text is never stored or logged.
+      if (current.helperPaired) this.sendToOwnerHelper(current.participantId, message);
+      return;
+    }
     if (message.type === 'helper-input') {
       if (size > MAX_HELPER_INPUT_BYTES) {
         sendProtocolError(socket, 'invalid_message', 'Input message is too large.');
@@ -289,7 +317,14 @@ export class CallRoom extends DurableObject {
     ownerParticipantId: string,
     message: Extract<
       z.infer<typeof clientSignalingMessageSchema>,
-      { type: 'helper-session-authorized' | 'helper-session-revoked' | 'helper-input' }
+      {
+        type:
+          | 'helper-session-authorized'
+          | 'helper-session-revoked'
+          | 'helper-input'
+          | 'helper-clipboard-write'
+          | 'helper-clipboard-read';
+      }
     >,
   ): void {
     const payload = JSON.stringify(message);
