@@ -20,7 +20,9 @@ const REMEMBERED_TRANSFERS: usize = 64;
 pub enum ClipboardError {
     /// This platform has no clipboard backend.
     Unavailable,
-    /// The operation failed or timed out; no content was changed or exposed.
+    /// The operation failed or timed out; no content was changed or exposed. Only the macOS
+    /// backend constructs it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Failed,
 }
 
