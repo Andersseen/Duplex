@@ -11,6 +11,19 @@ import {
 } from '@duplex/protocol';
 import type { ServerSignalingMessage } from '@duplex/protocol';
 import { z } from 'zod';
+import {
+  RATE_LIMIT_CLOSE_CODE,
+  RATE_LIMIT_CLOSE_REASON,
+  createHelperLimiter,
+  createParticipantLimiter,
+} from './rate-limit';
+import type {
+  Clock,
+  ConnectionLimiter,
+  HelperCategory,
+  ParticipantCategory,
+  TakeResult,
+} from './rate-limit';
 import { generateRtcConfiguration } from './rtc-config';
 
 const MAX_MESSAGE_BYTES = 128 * 1024;
@@ -54,6 +67,29 @@ function randomParticipantId(): string {
   return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
 }
 
+function participantCategory(
+  type: z.infer<typeof clientSignalingMessageSchema>['type'],
+): ParticipantCategory {
+  switch (type) {
+    case 'helper-input':
+      return 'input';
+    case 'helper-clipboard-write':
+    case 'helper-clipboard-read':
+      return 'clipboard';
+    case 'leave':
+    case 'helper-session-authorized':
+    case 'helper-session-revoked':
+      return 'control';
+    default:
+      return 'signaling';
+  }
+}
+
+function helperCategory(type: z.infer<typeof helperOutboundMessageSchema>['type']): HelperCategory {
+  if (type === 'helper-clipboard-result') return 'clipboard';
+  return type === 'helper-stop-control' ? 'control' : 'status';
+}
+
 function attachment(socket: WebSocket): z.infer<typeof attachmentSchema> | null {
   const parsed = attachmentSchema.safeParse(socket.deserializeAttachment());
   return parsed.success ? parsed.data : null;
@@ -86,6 +122,15 @@ function sendProtocolError(
 export class CallRoom extends DurableObject {
   static readonly capacity = MAX_ROOM_PARTICIPANTS;
 
+  /** Test seam: monotonic milliseconds used by the rate limiters. */
+  rateLimitClock: Clock = () => performance.now();
+  // Connection-scoped, in-memory only; entries are dropped when the socket closes.
+  private readonly participantLimiters = new WeakMap<
+    WebSocket,
+    ConnectionLimiter<ParticipantCategory>
+  >();
+  private readonly helperLimiters = new WeakMap<WebSocket, ConnectionLimiter<HelperCategory>>();
+
   override async fetch(request: Request): Promise<Response> {
     if (new URL(request.url).pathname.endsWith('/helper/ws')) return this.connectHelper(request);
     if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
@@ -114,6 +159,15 @@ export class CallRoom extends DurableObject {
       return;
     }
     if (current.kind === 'helper') {
+      let helperLimiter = this.helperLimiters.get(socket);
+      if (!helperLimiter) {
+        helperLimiter = createHelperLimiter(this.rateLimitClock);
+        this.helperLimiters.set(socket, helperLimiter);
+      }
+      if (helperLimiter.takeFrame() !== 'ok') {
+        this.closeRateLimited(socket, 'helper', 'frame');
+        return;
+      }
       const helperBytes =
         typeof data === 'string' ? new TextEncoder().encode(data).byteLength : Infinity;
       if (typeof data !== 'string' || helperBytes > MAX_CLIPBOARD_MESSAGE_BYTES) {
@@ -130,6 +184,13 @@ export class CallRoom extends DurableObject {
       const helperMessage = helperOutboundMessageSchema.safeParse(helperRaw);
       if (!helperMessage.success) {
         socket.close(1008, 'Invalid helper message');
+        return;
+      }
+      const helperCategoryName = helperCategory(helperMessage.data.type);
+      const helperVerdict = helperLimiter.takeCategory(helperCategoryName);
+      if (helperVerdict !== 'ok') {
+        if (helperVerdict === 'abusive')
+          this.closeRateLimited(socket, 'helper', helperCategoryName);
         return;
       }
       // Only a clipboard answer may exceed the control-plane bound.
@@ -159,6 +220,16 @@ export class CallRoom extends DurableObject {
         });
       return;
     }
+    let limiter = this.participantLimiters.get(socket);
+    if (!limiter) {
+      limiter = createParticipantLimiter(this.rateLimitClock);
+      this.participantLimiters.set(socket, limiter);
+    }
+    // Charged before any parsing so malformed, binary and unknown frames cannot dodge the limit.
+    if (limiter.takeFrame() !== 'ok') {
+      this.closeRateLimited(socket, 'participant', 'frame');
+      return;
+    }
     const size =
       typeof data === 'string' ? new TextEncoder().encode(data).byteLength : data.byteLength;
     if (size > MAX_MESSAGE_BYTES || typeof data !== 'string') {
@@ -182,6 +253,12 @@ export class CallRoom extends DurableObject {
       return;
     }
     const message = parsed.data;
+    const category = participantCategory(message.type);
+    const verdict: TakeResult = limiter.takeCategory(category);
+    if (verdict !== 'ok') {
+      if (verdict === 'abusive') this.closeRateLimited(socket, 'participant', category);
+      return;
+    }
 
     if (!current.joined) {
       if (message.type !== 'join') {
@@ -313,6 +390,19 @@ export class CallRoom extends DurableObject {
     }
   }
 
+  /** Never logs payloads, ids or addresses: only which kind of connection hit which limit. */
+  private closeRateLimited(
+    socket: WebSocket,
+    kind: 'participant' | 'helper',
+    category: string,
+  ): void {
+    console.warn('Connection closed for exceeding its message rate limit.', { kind, category });
+    this.participantLimiters.delete(socket);
+    this.helperLimiters.delete(socket);
+    // Closing a participant or helper also tears down the paired helper or control session.
+    socket.close(RATE_LIMIT_CLOSE_CODE, RATE_LIMIT_CLOSE_REASON);
+  }
+
   private sendToOwnerHelper(
     ownerParticipantId: string,
     message: Extract<
@@ -363,6 +453,8 @@ export class CallRoom extends DurableObject {
   }
 
   override webSocketClose(socket: WebSocket): void {
+    this.participantLimiters.delete(socket);
+    this.helperLimiters.delete(socket);
     this.notifyPeerLeft(socket);
     const current = attachment(socket);
     if (current?.kind === 'participant' && current.joined) {
@@ -377,6 +469,8 @@ export class CallRoom extends DurableObject {
   }
 
   override webSocketError(socket: WebSocket): void {
+    this.participantLimiters.delete(socket);
+    this.helperLimiters.delete(socket);
     this.notifyPeerLeft(socket);
     const current = attachment(socket);
     if (current?.kind === 'participant' && current.joined) {
