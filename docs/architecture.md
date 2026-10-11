@@ -102,6 +102,16 @@ WebRTC already provides encrypted peer-to-peer transport, with TURN as an encryp
 browsers. The receiver must accept each offer first, and the 256 MiB limit exists because the
 receiver assembles the file in browser memory. Transfers cannot resume after a disconnect.
 
+**The Worker rate-limits every connection.** `CallRoom` keeps in-memory token buckets per WebSocket
+(frame bucket before parsing, then per-category buckets; helper traffic is separate). Excess messages
+are dropped and sustained flooding closes the socket with code `4008`, which also tears down any
+paired helper or control session. Revocation, leave and Stop have their own buckets. Details in
+[docs/security.md](./security.md).
+
+**The web CSP is hash-based.** SSR and prerendered pages authorize only Angular's own inline
+event-replay scripts by SHA-256 (`src/server/csp.ts`, applied by a Nitro plugin for SSR and by
+`scripts/apply-static-csp.mjs` for static pages).
+
 **Native input requires a helper.** Browsers cannot move the operating-system cursor. The helper is
 a separate, narrowly-scoped native process that the user installs, pairs and grants OS permission to,
 and that re-validates everything it is sent.
