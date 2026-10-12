@@ -56,7 +56,7 @@ The Worker deployment preserves the existing `CALL_ROOM` binding and `v1` SQLite
 
 ## GitHub deployment
 
-The **Deploy production** workflow runs automatically on every push to `main` and can also be started with `workflow_dispatch`. It calls the same CI workflow used for pull requests, including Playwright and Rust checks, then deploys `duplex-worker` and `duplex-web` in that order.
+The **Deploy production** workflow is started with `workflow_dispatch`. It calls the same CI workflow used for pull requests, including Playwright and Rust checks, then deploys `duplex-worker` and `duplex-web` in that order. Keeping deployment manual prevents a push to `main` from attempting a production deploy before the required Cloudflare settings have been configured.
 
 Configure these repository settings before starting it:
 
