@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
-const ROOM_PATH = /\/r\/[A-Za-z0-9_-]{22}$/;
+const ROOM_PATH = /\/call\/[A-Za-z0-9_-]{22}$/;
 
 async function joinCall(page: Page): Promise<void> {
   await page.getByRole('button', { name: 'Join call' }).click();
@@ -31,7 +31,7 @@ test('every start gets a different, unguessable room', async ({ page }) => {
 });
 
 test('a malformed room link is rejected before any microphone prompt', async ({ page }) => {
-  await page.goto('/r/not-a-room');
+  await page.goto('/call/not-a-room');
 
   await expect(page.getByRole('heading', { name: 'Invalid room link' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Join call' })).toHaveCount(0);

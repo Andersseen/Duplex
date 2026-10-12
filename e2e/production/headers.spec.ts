@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { expect, test } from '@playwright/test';
 import type { Page } from '@playwright/test';
 
-const ROOM = '/r/AAAAAAAAAAAAAAAAAAAAAA';
+const apiPort = process.env.DUPLEX_E2E_API_PORT ?? '8787';
+
+const ROOM = '/call/AAAAAAAAAAAAAAAAAAAAAA';
 
 const REQUIRED_HEADERS: Record<string, RegExp> = {
   'content-security-policy': /default-src 'self'.*object-src 'none'.*frame-ancestors 'none'/,
@@ -193,7 +195,7 @@ test.describe('production security headers', () => {
   test('the CSP only allows signaling to the configured API origin', async ({ request }) => {
     const csp = (await request.get('/')).headers()['content-security-policy'] ?? '';
     expect(csp).toContain('connect-src');
-    expect(csp).toContain('ws://localhost:8787');
+    expect(csp).toContain(`ws://localhost:${apiPort}`);
     expect(csp).not.toMatch(/connect-src[^;]*\*/);
     expect(csp).not.toMatch(/script-src[^;]*\*/);
   });

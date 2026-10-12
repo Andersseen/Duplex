@@ -299,7 +299,7 @@ describe('RoomPage', () => {
     const progress = await screen.findByRole('progressbar', {
       name: 'Transfer progress for cancel.bin',
     });
-    expect(progress).toHaveAttribute('value', '2');
+    expect(progress).toHaveAttribute('aria-valuenow', '2');
     expect(screen.getByText('50%')).toBeVisible();
     await user.click(screen.getByRole('button', { name: 'Cancel' }));
     expect(controlTypes(channel)).toContain('file-cancel');

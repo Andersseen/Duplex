@@ -8,7 +8,7 @@ import LandingPage from './index.page';
 
 async function renderLanding() {
   return render(LandingPage, {
-    providers: [provideRouter([{ path: 'r/:roomId', children: [] }])],
+    providers: [provideRouter([{ path: 'call/:roomId', children: [] }])],
   });
 }
 
@@ -37,10 +37,7 @@ describe('LandingPage', () => {
   it('links to the documentation and source', async () => {
     await renderLanding();
 
-    expect(screen.getByRole('link', { name: 'Docs' })).toHaveAttribute(
-      'href',
-      expect.stringContaining('github.com/Andersseen/Duplex'),
-    );
+    expect(screen.getByRole('link', { name: 'Docs' })).toHaveAttribute('href', '/docs/index.html');
     expect(screen.getByRole('link', { name: 'GitHub' })).toBeInTheDocument();
   });
 
@@ -51,7 +48,7 @@ describe('LandingPage', () => {
     await user.click(screen.getByRole('button', { name: 'Start a call' }));
 
     const url = TestBed.inject(Router).url;
-    expect(url.startsWith('/r/')).toBe(true);
-    expect(roomIdSchema.safeParse(url.replace('/r/', '')).success).toBe(true);
+    expect(url.startsWith('/call/')).toBe(true);
+    expect(roomIdSchema.safeParse(url.replace('/call/', '')).success).toBe(true);
   });
 });

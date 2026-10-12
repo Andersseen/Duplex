@@ -16,7 +16,7 @@ vulnerability, see [SECURITY.md](../SECURITY.md).
 
 | Property              | Implementation                                                                                                        |
 | --------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Room URL as a secret  | The link `/r/<id>` is an anonymous capability. Anyone holding it can try to join while a seat is free.                |
+| Room URL as a secret  | The link `/call/<id>` is an anonymous capability. Anyone holding it can try to join while a seat is free.             |
 | Unguessable IDs       | IDs are 128 random bits (16 bytes, base64url, 22 characters), created in the browser with `crypto.getRandomValues`.   |
 | Two-person limit      | `CallRoom` admits at most two participants (`MAX_ROOM_PARTICIPANTS`). A third gets `room-full` and is closed.         |
 | Ephemeral             | A room exists only while its Durable Object is addressed. No database, no message history, no recordings.             |

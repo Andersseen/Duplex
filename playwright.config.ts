@@ -1,6 +1,10 @@
 import { defineConfig } from '@playwright/test';
 
 const inCi = Boolean(process.env.CI);
+const apiPort = process.env.DUPLEX_E2E_API_PORT ?? '8787';
+const webPort = process.env.DUPLEX_E2E_WEB_PORT ?? '5173';
+const apiOrigin = `http://127.0.0.1:${apiPort}`;
+const webOrigin = `http://127.0.0.1:${webPort}`;
 
 export default defineConfig({
   testDir: './e2e',
@@ -12,7 +16,7 @@ export default defineConfig({
   workers: 1,
   reporter: 'list',
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: webOrigin,
     browserName: 'chromium',
     launchOptions: {
       args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'],
@@ -22,16 +26,17 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'pnpm exec wrangler dev --local --var ENVIRONMENT:development --port 8787',
+      command: `pnpm exec wrangler dev --local --var ENVIRONMENT:development --port ${apiPort}`,
       cwd: 'apps/worker',
-      url: 'http://127.0.0.1:8787/health',
-      reuseExistingServer: false,
+      url: `${apiOrigin}/health`,
+      reuseExistingServer: !inCi,
       timeout: 60_000,
     },
     {
-      command: 'pnpm --filter @duplex/web exec vite --host 127.0.0.1 --port 5173',
-      url: 'http://127.0.0.1:5173',
-      reuseExistingServer: false,
+      command: `pnpm --filter @duplex/web exec vite --host 127.0.0.1 --port ${webPort}`,
+      env: { VITE_DUPLEX_API_ORIGIN: apiOrigin },
+      url: webOrigin,
+      reuseExistingServer: !inCi,
       timeout: 60_000,
     },
   ],

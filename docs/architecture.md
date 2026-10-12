@@ -59,8 +59,9 @@ Apps never import from other apps. Everything shared lives in `packages/*`.
   `clipboard-*` messages over `duplex-input`, per-operation authorization, controlled-side approval
   of reads, and relay to the paired helper.
 
-Components are presentation only. Small presentational pieces live in `ui/` (`ControlButton`,
-`StatusBadge`, `Panel`) and room panels in `room/`; they read state from the services.
+Components are presentation only. Shared controls and cards come from Volt UI; application-specific room
+panels live in `room/`, and the route components read state from the services without recreating shared
+UI atoms.
 
 ## Signaling and rooms
 
@@ -184,7 +185,12 @@ separate from pairing and from Accessibility: it needs neither a selected displa
 
 ## Web delivery
 
-`apps/web` is an Analog SSR app built with Nitro's `cloudflare_module` preset. The landing route and
-the call route are separate lazy chunks, and Angular Movement is loaded on demand only inside a
-call, so the landing page ships none of the call or animation code. Production responses carry the
-security headers described in [security.md](./security.md#web-security-headers).
+`apps/web` is an Analog SSR app built with Nitro's `cloudflare_module` preset. `/` is the landing route;
+`/call/:roomId` is the canonical call route and `/r/:roomId` is retained for compatibility. They are
+separate lazy chunks, and Angular Movement is loaded on demand only inside a call, so the landing page
+ships none of the call or animation code. Production responses carry the security headers described in
+[security.md](./security.md#web-security-headers).
+
+Entwine treats `docs/` as the source of truth and produces the static docs site, graph and structured
+context. `entwine.toml` discovers repository instructions and skills for agent context while keeping them
+out of the public site.

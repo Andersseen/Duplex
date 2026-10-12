@@ -26,6 +26,10 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Validate Entwine knowledge
+        run: pnpm docs:check
+      - name: Build Entwine documentation
+        run: pnpm docs:build
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck

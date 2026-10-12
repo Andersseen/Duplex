@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import type { Browser, BrowserContext, ConsoleMessage, Page } from '@playwright/test';
+import type { Browser, BrowserContext, ConsoleMessage, Locator, Page } from '@playwright/test';
 import WebSocket from 'ws';
 import { decodeHelperPairingBundle, MAX_CLIPBOARD_TEXT_BYTES } from '@duplex/protocol';
 
@@ -168,7 +168,7 @@ async function startRoom(
   const controller = await controllerContext.newPage();
   await openHydratedPage(sharer, '/');
   await sharer.getByRole('button', { name: 'Start a call' }).click();
-  await expect(sharer).toHaveURL(/\/r\//);
+  await expect(sharer).toHaveURL(/\/call\//);
   const roomUrl = sharer.url();
   await sharer.getByRole('button', { name: 'Join call' }).click();
   await openHydratedPage(controller, roomUrl);
@@ -198,22 +198,31 @@ const dialog = (page: Page) =>
   page.getByRole('alertdialog', { name: 'Control permission request' });
 const clipboardBox = (page: Page) => page.getByRole('checkbox', { name: /Clipboard text/ });
 
+async function setCheckbox(locator: Locator, checked: boolean): Promise<void> {
+  if ((await locator.getAttribute('aria-checked')) === String(checked)) return;
+  await locator.click();
+  await expect(locator).toHaveAttribute('aria-checked', String(checked));
+}
+
 /** Request only the clipboard scope and have the sharer allow it. */
 async function grantClipboard(room: Room, extra: { pointer?: boolean } = {}): Promise<Json> {
   const authorized = nextMessage(room.helper, 'helper-session-authorized');
   const pointerBox = room.controller.getByRole('checkbox', { name: /Pointer/ });
-  if (!extra.pointer && (await pointerBox.count()) > 0) await pointerBox.uncheck();
-  await clipboardBox(room.controller).check();
+  if (!extra.pointer && (await pointerBox.count()) > 0) await setCheckbox(pointerBox, false);
+  await setCheckbox(clipboardBox(room.controller), true);
   await room.controller.getByRole('button', { name: 'Request control' }).click();
   await expect(dialog(room.sharer)).toBeVisible();
   // Informed consent: the clipboard is described and starts unchecked.
   await expect(dialog(room.sharer)).toContainText('You approve every read of your clipboard');
-  await expect(clipboardBox(room.sharer)).not.toBeChecked();
+  await expect(clipboardBox(room.sharer)).toHaveAttribute('aria-checked', 'false');
   if (!extra.pointer)
     await expect(room.sharer.getByRole('button', { name: 'Allow' })).toBeDisabled();
-  await clipboardBox(room.sharer).check();
+  await setCheckbox(clipboardBox(room.sharer), true);
   if (extra.pointer)
-    await expect(room.sharer.getByRole('checkbox', { name: /Pointer/ })).toBeChecked();
+    await expect(room.sharer.getByRole('checkbox', { name: /Pointer/ })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
   await room.sharer.getByRole('button', { name: 'Allow' }).click();
   await expect(room.controller.getByText('Control granted')).toBeVisible();
   return authorized;
@@ -252,7 +261,7 @@ test('clipboard consent and transfer: opt-in scope, manual send, approved read, 
     await expect(controller.getByText('Available: pointer · clipboard')).toBeVisible();
 
     // 1. A default request never includes the clipboard, so a pointer grant cannot reach it.
-    await expect(clipboardBox(controller)).not.toBeChecked();
+    await expect(clipboardBox(controller)).toHaveAttribute('aria-checked', 'false');
     await controller.getByRole('button', { name: 'Request control' }).click();
     await expect(dialog(sharer)).toContainText('pointer');
     await expect(dialog(sharer)).not.toContainText('Clipboard');
@@ -444,7 +453,7 @@ test('browser clipboard permission denial is explained and nothing is sent', asy
     },
   });
   try {
-    await room.controller.getByRole('checkbox', { name: /Clipboard text/ }).check();
+    await setCheckbox(clipboardBox(room.controller), true);
     await grantClipboardFromChecked(room);
     await room.controller.getByRole('button', { name: 'Send my clipboard text' }).click();
     await expect(room.controller.getByRole('alert')).toContainText(
@@ -464,7 +473,7 @@ test('an unsupported browser clipboard is reported accurately', async ({ browser
     },
   });
   try {
-    await room.controller.getByRole('checkbox', { name: /Clipboard text/ }).check();
+    await setCheckbox(clipboardBox(room.controller), true);
     await grantClipboardFromChecked(room);
     await expect(room.controller.getByText(/limits clipboard access/)).toBeVisible();
     await expect(
@@ -510,7 +519,7 @@ test('losing the peer or the helper ends the clipboard session', async ({ browse
 async function grantClipboardFromChecked(room: Room): Promise<void> {
   await room.controller.getByRole('button', { name: 'Request control' }).click();
   await expect(dialog(room.sharer)).toBeVisible();
-  await clipboardBox(room.sharer).check();
+  await setCheckbox(clipboardBox(room.sharer), true);
   await room.sharer.getByRole('button', { name: 'Allow' }).click();
   await expect(room.controller.getByText('Control granted')).toBeVisible();
 }

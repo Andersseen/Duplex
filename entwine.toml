@@ -1,0 +1,6 @@
+[discovery]
+agent_instructions = true
+skills = true
+
+[site]
+include_agent_knowledge = false

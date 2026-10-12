@@ -6,6 +6,7 @@ Duplex deploys two independent Cloudflare Workers:
 - `apps/web`: Analog SSR app built with Nitro's `cloudflare_module` preset.
 
 Build and deployment are separate. `pnpm build` never deploys. `pnpm deploy` deploys the signaling Worker first, then the web Worker.
+The web deployment also compiles the repository's `docs/` with Entwine and publishes the generated site at `/docs/`.
 
 ## Cloudflare prerequisites
 
@@ -41,20 +42,21 @@ For local TURN testing, create `apps/worker/.dev.vars` (ignored by Git) with the
 
 ## Deploy from a workstation
 
-After authenticating Wrangler with `pnpm exec wrangler login`, provide the account ID and the two public deployment values in the shell, then run:
+After authenticating Wrangler with `pnpm exec wrangler login`, copy `.env.deploy.example` to `.env.deploy.local`, replace its placeholders, and run:
 
 ```bash
-export CLOUDFLARE_ACCOUNT_ID="your-cloudflare-account-id"
-export ALLOWED_ORIGINS="https://call.andersseen.dev"
-export VITE_DUPLEX_API_ORIGIN="https://api.example.com"
 pnpm deploy
 ```
 
+The local deploy scripts load `.env.deploy.local` automatically. The file is ignored by Git and may
+contain the Cloudflare API token used by Wrangler. CI supplies the same values from protected
+repository secrets and variables instead.
+
 The Worker deployment preserves the existing `CALL_ROOM` binding and `v1` SQLite Durable Object migration. It does not create or rename a Durable Object class. Configure `TURN_KEY_ID` and `TURN_KEY_API_TOKEN` directly on the deployed Worker as secrets; deployment does not upload them.
 
-## Manual GitHub deployment
+## GitHub deployment
 
-The **Deploy production** workflow is started with `workflow_dispatch`. It calls the same CI workflow used for pull requests, including Playwright and Rust checks, then deploys `duplex-worker` and `duplex-web` in that order.
+The **Deploy production** workflow runs automatically on every push to `main` and can also be started with `workflow_dispatch`. It calls the same CI workflow used for pull requests, including Playwright and Rust checks, then deploys `duplex-worker` and `duplex-web` in that order.
 
 Configure these repository settings before starting it:
 

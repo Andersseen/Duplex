@@ -1,9 +1,14 @@
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const localEnvFile = fileURLToPath(new URL('../.env.deploy.local', import.meta.url));
+if (existsSync(localEnvFile)) process.loadEnvFile(localEnvFile);
 
 const allowedOrigins = process.env.ALLOWED_ORIGINS?.trim();
 if (!allowedOrigins) {
   console.error(
-    'Set ALLOWED_ORIGINS to the comma-separated production web origins before deploying.',
+    'Set ALLOWED_ORIGINS to the comma-separated production web origins before deploying, or use .env.deploy.local.',
   );
   process.exit(1);
 }

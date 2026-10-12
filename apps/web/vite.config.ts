@@ -5,7 +5,7 @@ import { defineConfig } from 'vite';
 
 // The worker (`pnpm dev` runs it alongside) serves /health and /api/*. Analog's own
 // server routes move to /_analog so they do not shadow the worker's /api.
-const WORKER_ORIGIN = 'http://localhost:8787';
+const WORKER_ORIGIN = process.env['VITE_DUPLEX_API_ORIGIN'] ?? 'http://localhost:8787';
 
 /**
  * Response headers for the production web Worker. They are applied by Nitro route rules (SSR

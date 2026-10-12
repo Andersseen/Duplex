@@ -12,6 +12,7 @@ import {
 import type { ElementRef, OnDestroy } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { inputKeyboardSchema, roomIdSchema } from '@duplex/protocol';
+import { VoltBadge, VoltCard, VoltInput, VoltNativeButton } from '@voltui/components';
 import { CallSessionService } from '../services/call-session.service';
 import { clientToNormalized, containedVideoRect } from '../collaboration/screen-geometry';
 import type { NormalizedPoint } from '../services/collaboration.service';
@@ -20,16 +21,15 @@ import { EnterMotion, preloadMovement } from '../ui/enter-motion';
 import { AssistPanel } from '../room/assist-panel';
 import { FileTransferList } from '../room/file-transfer-list';
 import { HelperPanel } from '../room/helper-panel';
-import { ControlButton } from '../ui/control-button';
-import { StatusBadge } from '../ui/status-badge';
-import type { StatusTone } from '../ui/status-badge';
 
 @Component({
   selector: 'dx-room-page',
   imports: [
     RouterLink,
-    ControlButton,
-    StatusBadge,
+    VoltBadge,
+    VoltCard,
+    VoltInput,
+    VoltNativeButton,
     HelperPanel,
     AssistPanel,
     FileTransferList,
@@ -44,11 +44,11 @@ import type { StatusTone } from '../ui/status-badge';
       @if (isActive()) {
         <div class="flex items-center gap-3">
           @if (showConnectionPath) {
-            <span class="hidden text-xs text-ink-muted sm:inline">
+            <span class="hidden text-xs text-muted-foreground sm:inline">
               {{ session.connectionPath() }} path
             </span>
           }
-          <dx-status-badge [tone]="statusTone()">{{ statusText() }}</dx-status-badge>
+          <volt-badge [variant]="statusVariant()">{{ statusText() }}</volt-badge>
         </div>
       }
     </header>
@@ -59,7 +59,7 @@ import type { StatusTone } from '../ui/status-badge';
         [class.justify-center]="!isActive()"
       >
         <section
-          class="relative flex min-h-[45vh] w-full max-w-6xl items-center justify-center overflow-hidden rounded-3xl border border-line bg-surface-muted p-3 sm:min-h-[60vh]"
+          class="relative flex min-h-[45vh] w-full max-w-6xl items-center justify-center overflow-hidden rounded-3xl border border-border bg-muted p-3 sm:min-h-[60vh]"
           [class.hidden]="
             !isActive() || (!session.remoteVideoStream() && !session.localVideoStream())
           "
@@ -85,7 +85,7 @@ import type { StatusTone } from '../ui/status-badge';
             ></video>
             <div
               [class.hidden]="session.remoteVideoStream() || session.screenSharing()"
-              class="flex min-h-64 items-center justify-center text-ink-muted"
+              class="flex min-h-64 items-center justify-center text-muted-foreground"
             >
               Your preview
             </div>
@@ -160,14 +160,14 @@ import type { StatusTone } from '../ui/status-badge';
         @if (!isValidRoom()) {
           <section class="flex flex-col items-center gap-3 text-center" dxEnter>
             <h1 class="text-3xl font-semibold tracking-tight sm:text-5xl">Invalid room link</h1>
-            <p class="max-w-prose text-lg text-ink-muted">This link is not a Duplex room.</p>
+            <p class="max-w-prose text-lg text-muted-foreground">This link is not a Duplex room.</p>
             <a routerLink="/" class="underline underline-offset-4">Start a new call</a>
           </section>
         } @else if (session.state() === 'ready') {
           <section class="flex flex-col items-center gap-4 text-center" dxEnter>
             <h1 class="text-3xl font-semibold tracking-tight sm:text-5xl">Ready to join</h1>
-            <p class="text-lg text-ink-muted">Your microphone will turn on when you join.</p>
-            <dx-control-button label="Join call" variant="primary" (activated)="join()" />
+            <p class="text-lg text-muted-foreground">Your microphone will turn on when you join.</p>
+            <button voltButton variant="solid" (click)="join()">Join call</button>
           </section>
         } @else if (session.state() === 'failed' || session.state() === 'left') {
           <section class="flex flex-col items-center gap-4 text-center">
@@ -175,19 +175,15 @@ import type { StatusTone } from '../ui/status-badge';
               {{ session.state() === 'left' ? 'You left the call' : 'Could not join the call' }}
             </h1>
             @if (session.sessionError()) {
-              <p role="alert" class="max-w-prose text-ink-muted">{{ session.sessionError() }}</p>
+              <p role="alert" class="max-w-prose text-muted-foreground">
+                {{ session.sessionError() }}
+              </p>
             }
             <div class="flex items-center gap-3">
-              <dx-control-button
-                [label]="session.state() === 'left' ? 'Rejoin call' : 'Try again'"
-                variant="primary"
-                (activated)="join()"
-              />
-              <a
-                routerLink="/"
-                class="inline-flex min-h-11 items-center rounded-full border border-line px-5 py-2.5"
-                >Back</a
-              >
+              <button voltButton variant="solid" (click)="join()">
+                {{ session.state() === 'left' ? 'Rejoin call' : 'Try again' }}
+              </button>
+              <a voltButton variant="outline" routerLink="/">Back</a>
             </div>
           </section>
         } @else if (session.state() === 'requesting-media' || session.state() === 'joining') {
@@ -201,38 +197,37 @@ import type { StatusTone } from '../ui/status-badge';
           </section>
         } @else {
           @if (session.sessionError()) {
-            <p role="alert" class="text-sm text-danger">{{ session.sessionError() }}</p>
+            <p role="alert" class="text-sm text-destructive">{{ session.sessionError() }}</p>
           }
-          <section
-            class="flex min-h-[30vh] w-full max-w-4xl flex-col items-center justify-center gap-3 rounded-3xl border border-line bg-surface px-6 text-center"
+          <volt-card
+            class="flex min-h-[30vh] w-full max-w-4xl flex-col items-center justify-center gap-3 px-6 text-center"
             [class.hidden]="session.remoteVideoStream() || session.localVideoStream()"
             aria-label="Audio call"
           >
             <h1 class="text-3xl font-semibold tracking-tight">
               {{ session.state() === 'connected' ? 'Connected' : statusText() }}
             </h1>
-            <p class="text-ink-muted">
+            <p class="text-muted-foreground">
               {{
                 session.state() === 'connected'
                   ? 'Audio call · Camera and screen are off.'
                   : 'Share this link with the person you want to talk to.'
               }}
             </p>
-          </section>
+          </volt-card>
 
           @if (session.state() !== 'connected') {
             <div class="flex w-full max-w-4xl flex-wrap items-center justify-center gap-2">
               <label for="room-link" class="text-sm font-medium">Copy this link</label>
-              <input
+              <volt-input
                 id="room-link"
-                class="w-[min(80vw,32rem)] rounded-lg border border-line bg-transparent px-3 py-2 text-sm"
+                class="w-[min(80vw,32rem)]"
                 readonly
                 [value]="session.roomUrl()"
               />
-              <dx-control-button
-                [label]="copied() ? 'Copied' : 'Copy link'"
-                (activated)="copyLink()"
-              />
+              <button voltButton variant="outline" (click)="copyLink()">
+                {{ copied() ? 'Copied' : 'Copy link' }}
+              </button>
             </div>
           }
 
@@ -243,28 +238,34 @@ import type { StatusTone } from '../ui/status-badge';
               aria-label="Screen collaboration tools"
             >
               @for (tool of collaborationTools; track tool.id) {
-                <dx-control-button
-                  [label]="tool.label"
-                  [pressed]="session.collaboration.tool() === tool.id"
+                <button
+                  voltButton
+                  variant="outline"
+                  [attr.aria-pressed]="session.collaboration.tool() === tool.id"
                   [disabled]="toolDisabled(tool.id)"
-                  (activated)="session.collaboration.setTool(tool.id)"
-                />
+                  (click)="session.collaboration.setTool(tool.id)"
+                >
+                  {{ tool.label }}
+                </button>
               }
-              <dx-control-button
-                label="Clear"
+              <button
+                voltButton
+                variant="outline"
                 [disabled]="!session.collaboration.collaborationChannelOpen()"
-                (activated)="session.collaboration.clearAnnotations()"
-              />
+                (click)="session.collaboration.clearAnnotations()"
+              >
+                Clear
+              </button>
             </div>
           }
           @if (session.cameraError()) {
-            <p role="alert" class="text-sm text-danger">{{ session.cameraError() }}</p>
+            <p role="alert" class="text-sm text-destructive">{{ session.cameraError() }}</p>
           }
           @if (session.screenError()) {
-            <p role="alert" class="text-sm text-danger">{{ session.screenError() }}</p>
+            <p role="alert" class="text-sm text-destructive">{{ session.screenError() }}</p>
           }
           @if (session.screenSharing()) {
-            <p class="text-sm text-ink-muted">
+            <p class="text-sm text-muted-foreground">
               Sharing screen. Your camera will resume when sharing stops.
             </p>
           }
@@ -289,30 +290,39 @@ import type { StatusTone } from '../ui/status-badge';
 
     @if (isActive()) {
       <footer
-        class="sticky bottom-0 border-t border-line bg-canvas/90 px-4 py-3 backdrop-blur sm:px-6"
+        class="sticky bottom-0 border-t border-border bg-background/90 px-4 py-3 backdrop-blur sm:px-6"
       >
         <div
           role="group"
           aria-label="Call controls"
           class="flex flex-wrap justify-center gap-2 sm:gap-3"
         >
-          <dx-control-button
-            [label]="session.muted() ? 'Unmute' : 'Mute'"
-            [pressed]="!session.muted()"
-            (activated)="session.toggleMute()"
-          />
-          <dx-control-button
-            [label]="session.cameraEnabled() ? 'Camera off' : 'Turn camera on'"
-            [pressed]="session.cameraEnabled()"
-            (activated)="session.toggleCamera()"
-          />
-          <dx-control-button
-            [label]="session.screenSharing() ? 'Stop sharing' : 'Share screen'"
-            [pressed]="session.screenSharing()"
-            (activated)="session.toggleScreenSharing()"
-          />
+          <button
+            voltButton
+            variant="outline"
+            [attr.aria-pressed]="!session.muted()"
+            (click)="session.toggleMute()"
+          >
+            {{ session.muted() ? 'Unmute' : 'Mute' }}
+          </button>
+          <button
+            voltButton
+            variant="outline"
+            [attr.aria-pressed]="session.cameraEnabled()"
+            (click)="session.toggleCamera()"
+          >
+            {{ session.cameraEnabled() ? 'Camera off' : 'Turn camera on' }}
+          </button>
+          <button
+            voltButton
+            variant="outline"
+            [attr.aria-pressed]="session.screenSharing()"
+            (click)="session.toggleScreenSharing()"
+          >
+            {{ session.screenSharing() ? 'Stop sharing' : 'Share screen' }}
+          </button>
           @if (session.fileChannelOpen()) {
-            <dx-control-button label="Send file" (activated)="openFilePicker()" />
+            <button voltButton variant="outline" (click)="openFilePicker()">Send file</button>
             <input
               #filePicker
               class="hidden"
@@ -322,7 +332,7 @@ import type { StatusTone } from '../ui/status-badge';
               (change)="selectFiles($event)"
             />
           }
-          <dx-control-button label="Leave" variant="danger" (activated)="leave()" />
+          <button voltButton variant="destructive" (click)="leave()">Leave</button>
         </div>
       </footer>
     }
@@ -347,7 +357,7 @@ export default class RoomPage implements OnDestroy {
     { id: 'draw', label: 'Draw', disabled: false },
   ] as const;
   protected readonly pipClasses =
-    'absolute bottom-3 right-3 max-h-40 w-[min(28%,18rem)] rounded-2xl border border-line bg-surface-muted object-contain shadow-lg';
+    'absolute bottom-3 right-3 max-h-40 w-[min(28%,18rem)] rounded-2xl border border-border bg-muted object-contain shadow-lg';
   protected readonly showConnectionPath = import.meta.env.DEV;
   protected readonly isValidRoom = computed(() => roomIdSchema.safeParse(this.roomId()).success);
   protected readonly isActive = computed(() =>
@@ -366,14 +376,14 @@ export default class RoomPage implements OnDestroy {
     }
   });
 
-  protected readonly statusTone = computed<StatusTone>(() => {
+  protected readonly statusVariant = computed<'secondary' | 'success' | 'warning'>(() => {
     switch (this.session.state()) {
       case 'connected':
-        return 'ok';
+        return 'success';
       case 'reconnecting':
-        return 'warn';
+        return 'warning';
       default:
-        return 'neutral';
+        return 'secondary';
     }
   });
   protected readonly showTools = computed(
