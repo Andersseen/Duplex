@@ -2,6 +2,8 @@ name: Deploy production
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
 
 concurrency:
   group: production-deployment
@@ -19,6 +21,7 @@ jobs:
     name: Deploy Worker and web Workers
     needs: validate
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6

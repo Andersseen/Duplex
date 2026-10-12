@@ -11,6 +11,15 @@
       "command": "npx",
       "env": {},
       "type": "stdio"
+    },
+    "volt-ui": {
+      "type": "http",
+      "url": "https://volt-ui.pages.dev/api/mcp"
+    },
+    "entwine": {
+      "type": "stdio",
+      "command": "pnpm",
+      "args": ["exec", "entwine-mcp", "--root", "."]
     }
   }
 }

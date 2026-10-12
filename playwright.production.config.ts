@@ -6,20 +6,22 @@ import base from './playwright.config';
  * against a local signaling Worker, so the security headers shipped to production are tested
  * against hydration, WebSocket signaling, microphone/camera permissions, and WebRTC.
  */
-const API_ORIGIN = 'http://localhost:8787';
+const apiPort = process.env.DUPLEX_E2E_API_PORT ?? '8787';
+const webPort = process.env.DUPLEX_E2E_PRODUCTION_WEB_PORT ?? '4173';
+const API_ORIGIN = `http://localhost:${apiPort}`;
+const WEB_ORIGIN = `http://127.0.0.1:${webPort}`;
 
 export default defineConfig({
   ...base,
   testDir: './e2e/production',
   testIgnore: [],
-  use: { ...base.use, baseURL: 'http://127.0.0.1:4173' },
+  use: { ...base.use, baseURL: WEB_ORIGIN },
   webServer: [
     ...(Array.isArray(base.webServer) ? base.webServer.slice(0, 1) : []),
     {
-      command:
-        'pnpm --filter @duplex/web build:cloudflare && pnpm --filter @duplex/worker exec wrangler dev --config ../web/wrangler.jsonc --local --port 4173',
+      command: `pnpm --filter @duplex/web build:cloudflare && pnpm --filter @duplex/worker exec wrangler dev --config ../web/wrangler.jsonc --local --port ${webPort}`,
       env: { VITE_DUPLEX_API_ORIGIN: API_ORIGIN },
-      url: 'http://127.0.0.1:4173',
+      url: WEB_ORIGIN,
       reuseExistingServer: false,
       timeout: 240_000,
     },

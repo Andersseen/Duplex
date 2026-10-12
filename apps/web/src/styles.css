@@ -1,65 +1,16 @@
 @import 'tailwindcss';
-
-/*
- * Semantic tokens. Components use these names (bg-canvas, text-ink-muted, border-line, ...) rather
- * than raw palette values, so light/dark and contrast tuning live in one place. The theme follows
- * the system setting.
- */
-:root {
-  --dx-canvas: #fafafa;
-  --dx-surface: #ffffff;
-  --dx-surface-muted: #f4f4f5;
-  --dx-line: #d4d4d8;
-  --dx-ink: #18181b;
-  --dx-ink-muted: #52525b;
-  --dx-ink-inverse: #fafafa;
-  --dx-accent: #1d4ed8;
-  --dx-ok: #047857;
-  --dx-warn: #b45309;
-  --dx-danger: #be123c;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --dx-canvas: #09090b;
-    --dx-surface: #18181b;
-    --dx-surface-muted: #27272a;
-    --dx-line: #3f3f46;
-    --dx-ink: #fafafa;
-    --dx-ink-muted: #a1a1aa;
-    --dx-ink-inverse: #18181b;
-    --dx-accent: #93c5fd;
-    --dx-ok: #6ee7b7;
-    --dx-warn: #fcd34d;
-    --dx-danger: #fda4af;
-  }
-}
-
-@theme inline {
-  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-  --color-canvas: var(--dx-canvas);
-  --color-surface: var(--dx-surface);
-  --color-surface-muted: var(--dx-surface-muted);
-  --color-line: var(--dx-line);
-  --color-ink: var(--dx-ink);
-  --color-ink-muted: var(--dx-ink-muted);
-  --color-ink-inverse: var(--dx-ink-inverse);
-  --color-accent: var(--dx-accent);
-  --color-ok: var(--dx-ok);
-  --color-warn: var(--dx-warn);
-  --color-danger: var(--dx-danger);
-}
+@import '@voltui/components/themes.css';
 
 html {
-  color-scheme: light dark;
+  color-scheme: light;
 }
 
 body {
-  @apply bg-canvas text-ink antialiased;
+  @apply bg-background text-foreground antialiased;
 }
 
 :focus-visible {
-  outline: 2px solid var(--dx-accent);
+  outline: 2px solid var(--ring);
   outline-offset: 3px;
 }
 

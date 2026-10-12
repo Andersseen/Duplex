@@ -20,7 +20,7 @@ function fakeSession() {
     sessionError: signal<string | null>(null),
     cameraError: signal<string | null>(null),
     screenError: signal<string | null>(null),
-    roomUrl: signal('https://duplex.test/r/x'),
+    roomUrl: signal('https://duplex.test/call/x'),
     muted: signal(false),
     cameraEnabled: signal(false),
     screenSharing: signal(false),
@@ -70,7 +70,7 @@ function fakeSession() {
     toggleScreenSharing: vi.fn(),
     leave: vi.fn(),
     join: vi.fn(),
-    copyLink: vi.fn().mockReturnValue('https://duplex.test/r/x'),
+    copyLink: vi.fn().mockReturnValue('https://duplex.test/call/x'),
   };
 }
 

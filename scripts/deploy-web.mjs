@@ -1,9 +1,14 @@
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+const localEnvFile = fileURLToPath(new URL('../.env.deploy.local', import.meta.url));
+if (existsSync(localEnvFile)) process.loadEnvFile(localEnvFile);
 
 const apiOrigin = process.env.VITE_DUPLEX_API_ORIGIN?.trim();
 if (!apiOrigin) {
   console.error(
-    'Set VITE_DUPLEX_API_ORIGIN to the deployed signaling Worker origin before deploying.',
+    'Set VITE_DUPLEX_API_ORIGIN to the deployed signaling Worker origin before deploying, or use .env.deploy.local.',
   );
   process.exit(1);
 }

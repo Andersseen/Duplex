@@ -69,7 +69,7 @@ pnpm install
 pnpm dev            # web on http://localhost:5173 + signaling Worker on http://localhost:8787
 ```
 
-Open the app in two browser windows: **Start a call** in one, paste the link into the other.
+Open the app in two browser windows: **Start a call** in one, paste the `/call/<id>` link into the other.
 Real TURN relay and production deployment are covered in [DEPLOYMENT.md](./DEPLOYMENT.md).
 
 ## Features
@@ -162,6 +162,8 @@ from CI and is verified manually.
 pnpm test:coverage    # per-package thresholds
 pnpm e2e              # browser E2E + accessibility
 pnpm e2e:production   # production build with its real security headers
+pnpm docs:check       # validate Entwine's documentation graph and links
+pnpm docs:build       # generate static docs and the knowledge graph in dist/
 ```
 
 See [docs/testing.md](./docs/testing.md) for the test pyramid, thresholds and manual macOS checklist.

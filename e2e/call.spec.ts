@@ -30,7 +30,7 @@ test('two browser contexts can call, change media, and release room capacity', a
   try {
     await openHydratedPage(first, '/');
     await first.getByRole('button', { name: 'Start a call' }).click();
-    await expect(first).toHaveURL(/\/r\//);
+    await expect(first).toHaveURL(/\/call\//);
     const roomUrl = first.url();
     await first.getByRole('button', { name: 'Join call' }).click();
     await expect(first.getByRole('button', { name: 'Mute' })).toBeVisible();
@@ -109,7 +109,7 @@ test('peers collaborate over WebRTC while a synthetic screen is shared', async (
   try {
     await openHydratedPage(first, '/');
     await first.getByRole('button', { name: 'Start a call' }).click();
-    await expect(first).toHaveURL(/\/r\//);
+    await expect(first).toHaveURL(/\/call\//);
     const roomUrl = first.url();
     await first.getByRole('button', { name: 'Join call' }).click();
     await openHydratedPage(second, roomUrl);
@@ -232,7 +232,7 @@ test('Assist pairs one helper, grants pointer control, and relays validated inpu
   try {
     await openHydratedPage(first, '/');
     await first.getByRole('button', { name: 'Start a call' }).click();
-    await expect(first).toHaveURL(/\/r\//);
+    await expect(first).toHaveURL(/\/call\//);
     const roomUrl = first.url();
     await first.getByRole('button', { name: 'Join call' }).click();
     await openHydratedPage(second, roomUrl);
@@ -467,7 +467,7 @@ test('forced relay call selects a relay candidate', async ({ browser }) => {
   try {
     await openHydratedPage(first, '/');
     await first.getByRole('button', { name: 'Start a call' }).click();
-    await expect(first).toHaveURL(/\/r\//);
+    await expect(first).toHaveURL(/\/call\//);
     const roomUrl = first.url();
     await first.getByRole('button', { name: 'Join call' }).click();
     await openHydratedPage(second, roomUrl);
@@ -496,7 +496,7 @@ test('peers transfer and download the exact file bytes over the DataChannel', as
   try {
     await openHydratedPage(first, '/');
     await first.getByRole('button', { name: 'Start a call' }).click();
-    await expect(first).toHaveURL(/\/r\//);
+    await expect(first).toHaveURL(/\/call\//);
     const roomUrl = first.url();
     await first.getByRole('button', { name: 'Join call' }).click();
     await openHydratedPage(second, roomUrl);

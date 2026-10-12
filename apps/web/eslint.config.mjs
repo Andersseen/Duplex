@@ -1,3 +1,3 @@
 import { angularConfig } from '@duplex/config/eslint-angular';
 
-export default angularConfig(import.meta.dirname);
+export default [{ ignores: ['public/docs/**'] }, ...angularConfig(import.meta.dirname)];
