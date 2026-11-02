@@ -37,10 +37,10 @@
   },
   "devDependencies": {
     "@agentyx/cli": "^0.9.0",
-    "@axe-core/playwright": "^4.13.0",
+    "@axe-core/playwright": "^4.14.0",
     "@entwine/cli": "0.7.0",
     "@entwine/mcp": "0.7.0",
-    "@playwright/test": "^1.64.0",
+    "@playwright/test": "^1.64.1",
     "@types/ws": "^8.18.2",
     "prettier": "^3.9.9",
     "turbo": "^2.11.7",
